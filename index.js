@@ -58,9 +58,15 @@ function safeEqual(a, b) {
     return crypto.timingSafeEqual(ba, bb);
 }
 
+// MIGRATION NOTE: the theme's subscription cart drawer still calls /api/appstle/*
+// directly with no token. Enforcing the gate unconditionally would break it the
+// moment this deploys. So: APP_API_TOKEN unset = legacy passthrough (today's
+// behavior, no regression); APP_API_TOKEN set = enforced. Do NOT set the env var
+// until the drawer has been ported to the signed /proxy routes.
 function requireAppToken(req, res, next) {
     if (!process.env.APP_API_TOKEN) {
-        return res.status(500).json({ error: "Server misconfigured: APP_API_TOKEN not set." });
+        console.warn("APP_API_TOKEN not set - /api/appstle is running UNGATED (legacy mode).");
+        return next();
     }
     const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
     if (!token || !safeEqual(token, process.env.APP_API_TOKEN)) {
@@ -378,13 +384,19 @@ async function getContractForCustomer(customerId) {
         `https://subscription-admin.appstle.com/api/external/v2/subscription-customers/${customerId}`,
         { headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" } }
     );
-    const rows = Array.isArray(response.data) ? response.data : response.data ? [response.data] : [];
+    // Appstle's real shape (confirmed from the live cart-drawer integration):
+    //   { subscriptionContracts: { nodes: [ { id: "gid://shopify/SubscriptionContract/123", status: "ACTIVE", ... } ] } }
+    // Keep the flat-array fallback in case other tenants/versions differ.
+    const data = response.data || {};
+    const rows = (data.subscriptionContracts && data.subscriptionContracts.nodes) ||
+        (Array.isArray(data) ? data : [data]);
     const contracts = rows
         .map((r) => ({
-            id: r.subscriptionContractId || r.contractId || r.id,
+            // gid or bare numeric → bare numeric (what the external API's contractId param wants)
+            id: String(r.subscriptionContractId || r.contractId || r.id || "").split("/").pop(),
             status: String(r.status || "").toUpperCase(),
         }))
-        .filter((c) => c.id);
+        .filter((c) => /^\d+$/.test(c.id));
     return contracts.find((c) => c.status === "ACTIVE") || contracts[0] || null;
 }
 
