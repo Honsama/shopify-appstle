@@ -106,7 +106,11 @@ app.get("/auth", (req, res) => {
     }
 
     const state = crypto.randomBytes(16).toString("hex");
-    const redirectUri = `${APP_URL}/auth/callback`;
+    // Shopify requires redirect_uri's host to match the app's configured URL
+    // (shopify-appstle.vercel.app). If APP_URL is unset the old template made
+    // "undefined/auth/callback" → invalid_request. Fall back to the request host.
+    const base = APP_URL || `https://${req.get("host")}`;
+    const redirectUri = `${base}/auth/callback`;
 
     console.log("DEBUG - Redirecting to:", redirectUri);
 
