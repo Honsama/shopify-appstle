@@ -406,7 +406,10 @@ async function getContractForCustomer(customerId) {
             status: String(r.status || "").toUpperCase(),
         }))
         .filter((c) => /^\d+$/.test(c.id));
-    return contracts.find((c) => c.status === "ACTIVE") || contracts[0] || null;
+    // POLICY (Ricky, 2026-07-07): ACTIVE contracts only. Paused/cancelled
+    // customers are treated as non-subscribers — /box reports subscribed:false
+    // (the bookshelf shows its subscribe nudge) and /box-add refuses.
+    return contracts.find((c) => c.status === "ACTIVE") || null;
 }
 
 // Recursively collect every `sku` string in the contract payload — resilient to
