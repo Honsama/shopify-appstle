@@ -64,6 +64,11 @@ function safeEqual(a, b) {
 // behavior, no regression); APP_API_TOKEN set = enforced. Do NOT set the env var
 // until the drawer has been ported to the signed /proxy routes.
 function requireAppToken(req, res, next) {
+    // /box and /box-add live under /api/appstle only because the store's App
+    // Proxy ("Appstle API Connector Honsama") already targets this prefix —
+    // they carry their own auth (Shopify's App Proxy signature), so the
+    // bearer gate must never apply to them.
+    if (req.path === "/box" || req.path === "/box-add") return next();
     if (!process.env.APP_API_TOKEN) {
         console.warn("APP_API_TOKEN not set - /api/appstle is running UNGATED (legacy mode).");
         return next();
@@ -134,8 +139,12 @@ app.get("/auth/callback", async (req, res) => {
 });
 
 // ✅ Get api subscription customers contract Id
-app.get("/api/appstle/:customerId", async (req, res) => {
+app.get("/api/appstle/:customerId", async (req, res, next) => {
     const { customerId } = req.params;
+
+    // Customer ids are numeric. Anything else (e.g. "box") belongs to the
+    // signed App Proxy routes registered further down — let it fall through.
+    if (!/^\d+$/.test(customerId)) return next();
 
     try {
         const response = await axios.get(
@@ -414,9 +423,9 @@ function collectSkus(node, out) {
     return out;
 }
 
-// GET /proxy/box → { subscribed, contractId?, status?, skus[] }
+// GET box → { subscribed, contractId?, status?, skus[] }
 // Hydrates the bookshelf's amber "in your next box" chips.
-app.get("/proxy/box", async (req, res) => {
+async function boxHandler(req, res) {
     try {
         const contract = await getContractForCustomer(req.customerId);
         if (!contract) return res.status(200).json({ subscribed: false, skus: [] });
@@ -441,11 +450,11 @@ app.get("/proxy/box", async (req, res) => {
         console.error("proxy/box error:", error.response?.data || error.message);
         res.status(502).json({ error: "Failed to read box." });
     }
-});
+}
 
-// POST /proxy/add-line-item  { variantId, quantity? } → adds a ONE-TIME item to
-// the logged-in customer's own next box. isOneTimeProduct is hardcoded true.
-app.post("/proxy/add-line-item", async (req, res) => {
+// POST add  { variantId, quantity? } → adds a ONE-TIME item to the logged-in
+// customer's own next box. isOneTimeProduct is hardcoded true.
+async function addToBoxHandler(req, res) {
     const rawVariant = String((req.body || {}).variantId || "");
     const variantId = rawVariant.replace(/^gid:\/\/shopify\/ProductVariant\//, "");
     if (!/^\d+$/.test(variantId)) {
@@ -470,7 +479,22 @@ app.post("/proxy/add-line-item", async (req, res) => {
         console.error("proxy/add-line-item error:", error.response?.data || error.message);
         res.status(502).json({ error: "Failed to add to box.", details: error.response?.data || error.message });
     }
-});
+}
+
+// The store's EXISTING App Proxy ("Appstle API Connector Honsama") maps
+//   honsama.com/apps/appstle-proxy/*  →  {this app}/api/appstle/*
+// and must not be reconfigured — the live ADD TO BOX button and cart drawer
+// are built around this app. So the bookshelf's signed endpoints are exposed
+// BOTH under /proxy/* (if the proxy URL ever points there) AND as aliases
+// under /api/appstle/* where the existing proxy mapping already lands:
+//   /apps/appstle-proxy/box      → /api/appstle/box       (signed read)
+//   /apps/appstle-proxy/box-add  → /api/appstle/box-add   (signed add)
+// "box-add" (not "add-line-item") avoids colliding with the legacy
+// /api/appstle/add-line-item route the ADD TO BOX button uses today.
+app.get("/proxy/box", boxHandler);
+app.post("/proxy/add-line-item", addToBoxHandler);
+app.get("/api/appstle/box", verifyAppProxy, requireAppstleKey, boxHandler);
+app.post("/api/appstle/box-add", verifyAppProxy, requireAppstleKey, addToBoxHandler);
 
 // ✅ Error Handling for Undefined Routes
 app.use((req, res) => {
