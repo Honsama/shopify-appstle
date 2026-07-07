@@ -11,6 +11,12 @@ const APPSTLE_API_KEY = process.env.APPSTLE_API_KEY;
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const APP_URL = process.env.APP_URL; // Your Vercel App URL
+// Admin API token (shpat_...) from a store-owned custom app with read_orders +
+// read_all_orders — lets /owned walk a customer's ENTIRE order history (the
+// storefront Liquid customer.orders loop caps at ~50 orders, and app tokens
+// without read_all_orders only see 60 days).
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
+const SHOP_DOMAIN = process.env.SHOP_DOMAIN || "honsama.myshopify.com";
 
 // ✅ Allowed Origins (Multiple)
 const allowedOrigins = [
@@ -68,7 +74,7 @@ function requireAppToken(req, res, next) {
     // Proxy ("Appstle API Connector Honsama") already targets this prefix —
     // they carry their own auth (Shopify's App Proxy signature), so the
     // bearer gate must never apply to them.
-    if (req.path === "/box" || req.path === "/box-add") return next();
+    if (req.path === "/box" || req.path === "/box-add" || req.path === "/owned") return next();
     if (!process.env.APP_API_TOKEN) {
         console.warn("APP_API_TOKEN not set - /api/appstle is running UNGATED (legacy mode).");
         return next();
@@ -484,6 +490,55 @@ async function addToBoxHandler(req, res) {
     }
 }
 
+// GET owned → { available, skus[], orders } — the customer's FULL order history.
+// Storefront Liquid's customer.orders loop caps at ~50 orders, so heavy buyers'
+// shelves would silently truncate; this walks every order via the Admin API
+// (store-owned token with read_all_orders has no 60-day window). The bookshelf
+// uses Liquid data for first paint and swaps in this authoritative list.
+async function ownedHandler(req, res) {
+    if (!ADMIN_API_TOKEN) {
+        // Not configured yet — tell the client to keep its Liquid-rendered data.
+        return res.status(200).json({ available: false, skus: [] });
+    }
+    try {
+        const skus = [];
+        let after = null;
+        let orderCount = 0;
+        // 100 orders/page, 30-page guard = 3000 orders — far beyond any customer.
+        // lineItems capped at 100/order (a manga box order has <20 lines).
+        for (let page = 0; page < 30; page++) {
+            const response = await axios.post(
+                `https://${SHOP_DOMAIN}/admin/api/2025-10/graphql.json`,
+                {
+                    query: `query Owned($id: ID!, $after: String) {
+                        customer(id: $id) {
+                            orders(first: 100, after: $after) {
+                                pageInfo { hasNextPage endCursor }
+                                nodes { lineItems(first: 100) { nodes { sku } } }
+                            }
+                        }
+                    }`,
+                    variables: { id: `gid://shopify/Customer/${req.customerId}`, after },
+                },
+                { headers: { "X-Shopify-Access-Token": ADMIN_API_TOKEN, "Content-Type": "application/json" } }
+            );
+            if (response.data.errors) throw new Error(JSON.stringify(response.data.errors));
+            const orders = response.data?.data?.customer?.orders;
+            if (!orders) break; // unknown customer id → empty history
+            orders.nodes.forEach((o) => {
+                orderCount++;
+                (o.lineItems?.nodes || []).forEach((li) => { if (li.sku) skus.push(li.sku); });
+            });
+            if (!orders.pageInfo.hasNextPage) break;
+            after = orders.pageInfo.endCursor;
+        }
+        res.status(200).json({ available: true, orders: orderCount, skus: Array.from(new Set(skus)) });
+    } catch (error) {
+        console.error("proxy/owned error:", error.response?.data || error.message);
+        res.status(502).json({ error: "Failed to read order history." });
+    }
+}
+
 // The store's EXISTING App Proxy ("Appstle API Connector Honsama") maps
 //   honsama.com/apps/appstle-proxy/*  →  {this app}/api/appstle/*
 // and must not be reconfigured — the live ADD TO BOX button and cart drawer
@@ -498,6 +553,8 @@ app.get("/proxy/box", boxHandler);
 app.post("/proxy/add-line-item", addToBoxHandler);
 app.get("/api/appstle/box", verifyAppProxy, requireAppstleKey, boxHandler);
 app.post("/api/appstle/box-add", verifyAppProxy, requireAppstleKey, addToBoxHandler);
+// /owned talks to the Admin API, not Appstle — signature only, no Appstle key.
+app.get("/api/appstle/owned", verifyAppProxy, ownedHandler);
 
 // ✅ Error Handling for Undefined Routes
 app.use((req, res) => {
