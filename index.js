@@ -110,9 +110,12 @@ app.get("/auth", (req, res) => {
 
     console.log("DEBUG - Redirecting to:", redirectUri);
 
+    // read_all_orders is a protected scope with NO checkbox in the dev
+    // dashboard — but custom (non-public) apps may request it via OAuth
+    // without review. It lifts the 60-day order window for /owned.
     const installUrl =
         `https://${shop}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}` +
-        `&scope=read_orders,write_orders,read_customers` +
+        `&scope=read_orders,read_all_orders,write_orders,read_customers` +
         `&state=${state}&redirect_uri=${redirectUri}`;
 
     console.log("DEBUG - Installation URL:", installUrl);
@@ -137,7 +140,22 @@ app.get("/auth/callback", async (req, res) => {
             }
         );
 
-        res.send("<h1>App installed successfully. You can now use the Appstle API Proxy.</h1>");
+        // Shown ONCE to whoever completed the install (requires store-owner
+        // login). This app has no database, so the token is displayed for
+        // manual transfer into Vercel env ADMIN_API_TOKEN — copy it, save it,
+        // close this tab. Re-running /auth issues a fresh token.
+        const token = tokenResponse.data.access_token || "";
+        const scopes = tokenResponse.data.scope || "";
+        const hasAllOrders = scopes.split(",").indexOf("read_all_orders") !== -1;
+        res.send(
+            "<h1>App installed successfully.</h1>" +
+            "<p><strong>Granted scopes:</strong> <code>" + scopes + "</code></p>" +
+            (hasAllOrders
+                ? "<p>✅ <code>read_all_orders</code> granted — full order history unlocked.</p>"
+                : "<p>⚠️ <code>read_all_orders</code> NOT granted — the /owned endpoint will stay limited to 60 days.</p>") +
+            "<p><strong>Admin API access token</strong> (copy into Vercel env <code>ADMIN_API_TOKEN</code>, then redeploy — this is shown only here, keep it secret):</p>" +
+            "<pre style='font-size:16px;background:#f4f4f4;padding:12px;border-radius:6px;'>" + token + "</pre>"
+        );
     } catch (error) {
         console.error("OAuth Error:", error.message);
         res.status(500).send("Failed to complete OAuth.");
