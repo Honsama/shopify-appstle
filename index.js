@@ -76,7 +76,7 @@ function requireAppToken(req, res, next) {
     // bearer gate must never apply to them.
     // Signed App Proxy routes carry their own auth (Shopify HMAC signature +
     // logged_in_customer_id) — the bearer gate must never apply to them.
-    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/box-details", "/box-remove", "/box-skip", "/box-discount"];
+    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow"];
     if (SIGNED_PATHS.indexOf(req.path) !== -1) return next();
     if (!process.env.APP_API_TOKEN) {
         console.warn("APP_API_TOKEN not set - /api/appstle is running UNGATED (legacy mode).");
@@ -120,9 +120,11 @@ app.get("/auth", (req, res) => {
     // read_all_orders is a protected scope with NO checkbox in the dev
     // dashboard — but custom (non-public) apps may request it via OAuth
     // without review. It lifts the 60-day order window for /owned.
+    // write_customers lets /follow + /unfollow write the honsama.following
+    // customer metafield (the Follow-series feature).
     const installUrl =
         `https://${shop}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}` +
-        `&scope=read_orders,read_all_orders,write_orders,read_customers` +
+        `&scope=read_orders,read_all_orders,write_orders,read_customers,write_customers` +
         `&state=${state}&redirect_uri=${redirectUri}`;
 
     console.log("DEBUG - Installation URL:", installUrl);
@@ -581,6 +583,96 @@ async function ownedHandler(req, res) {
     }
 }
 
+// ---- Follow a series (signed, own-customer-only) -------------------------
+// POST follow / POST unfollow { seriesKey } — toggles a series in the
+// customer's `honsama.following` metafield (list.single_line_text_field of
+// canonical seriesKeys, e.g. "M-SS-GSTWL"). The client derives the key with
+// the collection engine's parseSku (SKU/series aliases applied), so the
+// server only validates shape. Reads need read_customers; WRITES need
+// write_customers — re-run /auth if metafieldsSet returns an access error.
+
+var SERIES_KEY_RE = /^[A-Z]+-[A-Z]+-[A-Z0-9&]+$/;
+var FOLLOW_METAFIELD = { namespace: "honsama", key: "following" };
+var FOLLOW_CAP = 300; // sanity ceiling; nobody follows 300 series
+
+async function adminGraphql(query, variables) {
+    const response = await axios.post(
+        `https://${SHOP_DOMAIN}/admin/api/2025-10/graphql.json`,
+        { query, variables },
+        { headers: { "X-Shopify-Access-Token": ADMIN_API_TOKEN, "Content-Type": "application/json" } }
+    );
+    if (response.data.errors) throw new Error(JSON.stringify(response.data.errors));
+    return response.data.data;
+}
+
+async function readFollowing(customerId) {
+    const data = await adminGraphql(
+        `query Following($id: ID!) {
+            customer(id: $id) {
+                metafield(namespace: "${FOLLOW_METAFIELD.namespace}", key: "${FOLLOW_METAFIELD.key}") { value }
+            }
+        }`,
+        { id: `gid://shopify/Customer/${customerId}` }
+    );
+    const raw = data?.customer?.metafield?.value;
+    if (!raw) return [];
+    try {
+        const list = JSON.parse(raw);
+        return Array.isArray(list) ? list.filter((k) => typeof k === "string") : [];
+    } catch (e) { return []; }
+}
+
+async function writeFollowing(customerId, keys) {
+    const data = await adminGraphql(
+        `mutation SetFollowing($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+                metafields { id }
+                userErrors { field message }
+            }
+        }`,
+        {
+            metafields: [{
+                ownerId: `gid://shopify/Customer/${customerId}`,
+                namespace: FOLLOW_METAFIELD.namespace,
+                key: FOLLOW_METAFIELD.key,
+                type: "list.single_line_text_field",
+                value: JSON.stringify(keys),
+            }],
+        }
+    );
+    const errs = data?.metafieldsSet?.userErrors || [];
+    if (errs.length) throw new Error(JSON.stringify(errs));
+}
+
+// Shared toggle: add=true → follow, add=false → unfollow. Idempotent — the
+// response always reflects the resulting list, so the client can re-sync.
+function followToggleHandler(add) {
+    return async function (req, res) {
+        const seriesKey = String((req.body || {}).seriesKey || "").trim().toUpperCase();
+        if (!SERIES_KEY_RE.test(seriesKey) || seriesKey.length > 32) {
+            return res.status(400).json({ error: "Invalid seriesKey." });
+        }
+        if (!ADMIN_API_TOKEN) {
+            return res.status(503).json({ error: "Follow is not configured yet." });
+        }
+        try {
+            let keys = await readFollowing(req.customerId);
+            const has = keys.indexOf(seriesKey) !== -1;
+            if (add && !has) keys.push(seriesKey);
+            if (!add && has) keys = keys.filter((k) => k !== seriesKey);
+            if (keys.length > FOLLOW_CAP) {
+                return res.status(400).json({ error: "Following too many series." });
+            }
+            // Only write when something changed — saves a mutation on repeats.
+            if (add !== has) await writeFollowing(req.customerId, keys);
+            res.status(200).json({ ok: true, following: keys });
+        } catch (error) {
+            console.error(`proxy/${add ? "follow" : "unfollow"} error:`, error.response?.data || error.message);
+            res.status(502).json({ error: add ? "Failed to follow." : "Failed to unfollow." });
+        }
+    };
+}
+
 // ---- Drawer operations, signed + own-contract-only ----------------------
 // These four port the cart drawer off the unauthenticated legacy routes.
 // The client NEVER sends a contractId — it's resolved server-side from the
@@ -686,6 +778,11 @@ app.get("/api/appstle/box", verifyAppProxy, requireAppstleKey, boxHandler);
 app.post("/api/appstle/box-add", verifyAppProxy, requireAppstleKey, addToBoxHandler);
 // /owned talks to the Admin API, not Appstle — signature only, no Appstle key.
 app.get("/api/appstle/owned", verifyAppProxy, ownedHandler);
+// Follow-series toggles also talk to the Admin API only (customer metafield).
+app.post("/proxy/follow", followToggleHandler(true));
+app.post("/proxy/unfollow", followToggleHandler(false));
+app.post("/api/appstle/follow", verifyAppProxy, followToggleHandler(true));
+app.post("/api/appstle/unfollow", verifyAppProxy, followToggleHandler(false));
 // Drawer operations (signed): /apps/appstle-proxy/box-* → here.
 app.get("/proxy/box-details", boxDetailsHandler);
 app.post("/proxy/box-remove", boxRemoveHandler);
