@@ -419,7 +419,19 @@ app.use("/proxy", verifyAppProxy, requireAppstleKey);
 
 // Look up the customer's subscription contract server-side. The client never
 // supplies a contractId — that's the whole per-customer security model.
+//
+// A customer's contract id is stable, so cache it per warm instance (10 min
+// TTL) — this removes one of the two sequential Appstle round-trips from every
+// repeat action (add/remove/skip/details), roughly halving server latency.
+// Null results (no subscription) are NOT cached, so a customer who subscribes
+// mid-session isn't locked out.
+const contractCache = new Map(); // customerId -> { contract, at }
+const CONTRACT_TTL_MS = 10 * 60 * 1000;
+
 async function getContractForCustomer(customerId) {
+    const hit = contractCache.get(customerId);
+    if (hit && Date.now() - hit.at < CONTRACT_TTL_MS) return hit.contract;
+
     const response = await axios.get(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-customers/${customerId}`,
         { headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" } }
@@ -440,7 +452,12 @@ async function getContractForCustomer(customerId) {
     // POLICY (Ricky, 2026-07-07): ACTIVE contracts only. Paused/cancelled
     // customers are treated as non-subscribers — /box reports subscribed:false
     // (the bookshelf shows its subscribe nudge) and /box-add refuses.
-    return contracts.find((c) => c.status === "ACTIVE") || null;
+    const contract = contracts.find((c) => c.status === "ACTIVE") || null;
+    // Cache hits skip the lookup entirely, so a cancellation can take up to
+    // CONTRACT_TTL_MS to be noticed here — Appstle still rejects writes against
+    // a dead contract, so the worst case is a clean upstream error.
+    if (contract) contractCache.set(customerId, { contract, at: Date.now() });
+    return contract;
 }
 
 // Recursively collect every `sku` string in the contract payload — resilient to
