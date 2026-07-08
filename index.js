@@ -74,7 +74,10 @@ function requireAppToken(req, res, next) {
     // Proxy ("Appstle API Connector Honsama") already targets this prefix —
     // they carry their own auth (Shopify's App Proxy signature), so the
     // bearer gate must never apply to them.
-    if (req.path === "/box" || req.path === "/box-add" || req.path === "/owned") return next();
+    // Signed App Proxy routes carry their own auth (Shopify HMAC signature +
+    // logged_in_customer_id) — the bearer gate must never apply to them.
+    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/box-details", "/box-remove", "/box-skip", "/box-discount"];
+    if (SIGNED_PATHS.indexOf(req.path) !== -1) return next();
     if (!process.env.APP_API_TOKEN) {
         console.warn("APP_API_TOKEN not set - /api/appstle is running UNGATED (legacy mode).");
         return next();
@@ -561,6 +564,95 @@ async function ownedHandler(req, res) {
     }
 }
 
+// ---- Drawer operations, signed + own-contract-only ----------------------
+// These four port the cart drawer off the unauthenticated legacy routes.
+// The client NEVER sends a contractId — it's resolved server-side from the
+// signed logged_in_customer_id, so a customer can only ever act on their own
+// subscription. (Remove/skip/discount are fine to expose here: this is the
+// same authority the Appstle portal widget already gives the customer.)
+
+// GET box-details → { subscribed, contractId?, details:[rows] } — the parsed
+// contract rows the drawer renders (titles, images, prices, lineIds, dates).
+async function boxDetailsHandler(req, res) {
+    try {
+        const contract = await getContractForCustomer(req.customerId);
+        if (!contract) return res.status(200).json({ subscribed: false, details: [] });
+
+        const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details?subscriptionContractId=${contract.id}&page=0&size=10&sort=id,desc`;
+        const response = await axios.get(url, {
+            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
+        });
+        const rows = Array.isArray(response.data) ? response.data : [];
+        rows.forEach((item) => {
+            ["contractDetailsJSON", "orderNoteAttributes", "lastSuccessfulOrder"].forEach((f) => {
+                if (typeof item[f] === "string") {
+                    try {
+                        item[f.replace("JSON", "")] = JSON.parse(item[f]);
+                        if (f === "contractDetailsJSON") item.contractDetails = JSON.parse(item[f]);
+                    } catch (e) { /* leave as-is */ }
+                }
+            });
+        });
+        res.status(200).json({ subscribed: true, contractId: contract.id, details: rows });
+    } catch (error) {
+        console.error("proxy/box-details error:", error.response?.data || error.message);
+        res.status(502).json({ error: "Failed to read box details." });
+    }
+}
+
+// POST box-remove { lineId } — remove a line from the customer's own contract.
+async function boxRemoveHandler(req, res) {
+    const lineId = String((req.body || {}).lineId || "").trim();
+    if (!lineId) return res.status(400).json({ error: "Missing lineId." });
+    const removeDiscount = (req.body || {}).removeDiscount !== false;
+    try {
+        const contract = await getContractForCustomer(req.customerId);
+        if (!contract) return res.status(403).json({ error: "No active subscription." });
+        const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item?contractId=${contract.id}&lineId=${encodeURIComponent(lineId)}&removeDiscount=${removeDiscount}`;
+        const response = await axios.put(url, {}, {
+            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
+        });
+        res.status(200).json({ ok: true, data: response.data });
+    } catch (error) {
+        console.error("proxy/box-remove error:", error.response?.data || error.message);
+        res.status(502).json({ error: "Failed to remove item.", details: error.response?.data || error.message });
+    }
+}
+
+// POST box-skip — skip the customer's own upcoming order.
+async function boxSkipHandler(req, res) {
+    try {
+        const contract = await getContractForCustomer(req.customerId);
+        if (!contract) return res.status(403).json({ error: "No active subscription." });
+        const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-billing-attempts/skip-upcoming-order?subscriptionContractId=${contract.id}`;
+        const response = await axios.put(url, {}, {
+            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
+        });
+        res.status(200).json({ ok: true, data: response.data });
+    } catch (error) {
+        console.error("proxy/box-skip error:", error.response?.data || error.message);
+        res.status(502).json({ error: "Failed to skip order.", details: error.response?.data || error.message });
+    }
+}
+
+// POST box-discount { discountCode } — apply a code to the customer's own contract.
+async function boxDiscountHandler(req, res) {
+    const discountCode = String((req.body || {}).discountCode || "").trim();
+    if (!discountCode) return res.status(400).json({ error: "Missing discountCode." });
+    try {
+        const contract = await getContractForCustomer(req.customerId);
+        if (!contract) return res.status(403).json({ error: "No active subscription." });
+        const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-apply-discount?contractId=${contract.id}&discountCode=${encodeURIComponent(discountCode)}`;
+        const response = await axios.put(url, {}, {
+            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
+        });
+        res.status(200).json({ ok: true, data: response.data });
+    } catch (error) {
+        console.error("proxy/box-discount error:", error.response?.data || error.message);
+        res.status(502).json({ error: "Failed to apply discount.", details: error.response?.data || error.message });
+    }
+}
+
 // The store's EXISTING App Proxy ("Appstle API Connector Honsama") maps
 //   honsama.com/apps/appstle-proxy/*  →  {this app}/api/appstle/*
 // and must not be reconfigured — the live ADD TO BOX button and cart drawer
@@ -577,6 +669,15 @@ app.get("/api/appstle/box", verifyAppProxy, requireAppstleKey, boxHandler);
 app.post("/api/appstle/box-add", verifyAppProxy, requireAppstleKey, addToBoxHandler);
 // /owned talks to the Admin API, not Appstle — signature only, no Appstle key.
 app.get("/api/appstle/owned", verifyAppProxy, ownedHandler);
+// Drawer operations (signed): /apps/appstle-proxy/box-* → here.
+app.get("/proxy/box-details", boxDetailsHandler);
+app.post("/proxy/box-remove", boxRemoveHandler);
+app.post("/proxy/box-skip", boxSkipHandler);
+app.post("/proxy/box-discount", boxDiscountHandler);
+app.get("/api/appstle/box-details", verifyAppProxy, requireAppstleKey, boxDetailsHandler);
+app.post("/api/appstle/box-remove", verifyAppProxy, requireAppstleKey, boxRemoveHandler);
+app.post("/api/appstle/box-skip", verifyAppProxy, requireAppstleKey, boxSkipHandler);
+app.post("/api/appstle/box-discount", verifyAppProxy, requireAppstleKey, boxDiscountHandler);
 
 // ✅ Error Handling for Undefined Routes
 app.use((req, res) => {
