@@ -74,7 +74,7 @@ function requireAppToken(req, res, next) {
     // Proxy ("Appstle API Connector Honsama") already targets this prefix —
     // they carry their own auth (Shopify's App Proxy signature +
     // logged_in_customer_id) — the bearer gate must never apply to them.
-    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow"];
+    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow", "/favorite", "/unfavorite"];
     if (SIGNED_PATHS.indexOf(req.path) !== -1) return next();
     if (!process.env.APP_API_TOKEN) {
         console.warn("APP_API_TOKEN not set - denying legacy /api/appstle request (fail-closed).");
@@ -579,7 +579,15 @@ async function addToBoxHandler(req, res) {
     }
 }
 
-// GET owned → { available, skus[], orders } — the customer's FULL order history.
+// "Honsama's Monthly Manga Box" product + its 2-Manga variant. Box billing
+// orders carry only the box line item (no per-manga SKUs), so the bookshelf
+// credits the featured manga from these order months + the store's box_month
+// metaobject entries.
+var BOX_PRODUCT_ID = "8150096773420";
+var BOX_VARIANT_2MANGA_ID = "52361633005868";
+
+// GET owned → { available, skus[], orders, boxMonths[], boxMonths2[] } — the
+// customer's FULL order history.
 // Storefront Liquid's customer.orders loop caps at ~50 orders, so heavy buyers'
 // shelves would silently truncate; this walks every order via the Admin API
 // (store-owned token with read_all_orders has no 60-day window). The bookshelf
@@ -591,6 +599,8 @@ async function ownedHandler(req, res) {
     }
     try {
         const skus = [];
+        const boxMonths = new Set();   // "YYYY-MM" box months billed (3-Manga / default)
+        const boxMonths2 = new Set();  // ... billed on the 2-Manga variant
         let after = null;
         let orderCount = 0;
         // 100 orders/page, 30-page guard = 3000 orders — far beyond any customer.
@@ -603,7 +613,10 @@ async function ownedHandler(req, res) {
                         customer(id: $id) {
                             orders(first: 100, after: $after) {
                                 pageInfo { hasNextPage endCursor }
-                                nodes { lineItems(first: 100) { nodes { sku } } }
+                                nodes {
+                                    createdAt
+                                    lineItems(first: 100) { nodes { sku product { id } variant { id } } }
+                                }
                             }
                         }
                     }`,
@@ -616,12 +629,31 @@ async function ownedHandler(req, res) {
             if (!orders) break; // unknown customer id → empty history
             orders.nodes.forEach((o) => {
                 orderCount++;
-                (o.lineItems?.nodes || []).forEach((li) => { if (li.sku) skus.push(li.sku); });
+                (o.lineItems?.nodes || []).forEach((li) => {
+                    if (li.sku) skus.push(li.sku);
+                    // Monthly Manga Box line → credit the shipped box's featured manga.
+                    // Billing runs ~the 21st for the NEXT month's box, so the box month
+                    // = month of (order date + 10 days) — shifts 21st-31st forward,
+                    // keeps 1st-20th in place. Matches the storefront cutoff copy
+                    // ("subscribe by July 21st ... ships in August").
+                    if (li.product?.id?.endsWith(`/${BOX_PRODUCT_ID}`)) {
+                        const d = new Date(new Date(o.createdAt).getTime() + 10 * 86400 * 1000);
+                        const month = d.toISOString().slice(0, 7);
+                        if (li.variant?.id?.endsWith(`/${BOX_VARIANT_2MANGA_ID}`)) boxMonths2.add(month);
+                        else boxMonths.add(month);
+                    }
+                });
             });
             if (!orders.pageInfo.hasNextPage) break;
             after = orders.pageInfo.endCursor;
         }
-        res.status(200).json({ available: true, orders: orderCount, skus: Array.from(new Set(skus)) });
+        res.status(200).json({
+            available: true,
+            orders: orderCount,
+            skus: Array.from(new Set(skus)),
+            boxMonths: Array.from(boxMonths).sort(),
+            boxMonths2: Array.from(boxMonths2).sort(),
+        });
     } catch (error) {
         console.error("proxy/owned error:", error.response?.data || error.message);
         res.status(502).json({ error: "Failed to read order history." });
@@ -638,6 +670,9 @@ async function ownedHandler(req, res) {
 
 var SERIES_KEY_RE = /^[A-Z]+-[A-Z]+-[A-Z0-9&]+$/;
 var FOLLOW_METAFIELD = { namespace: "honsama", key: "following" };
+// Favorites (pin-to-top-of-library) use the exact same mechanics on a
+// sibling metafield — same list type, same seriesKey values.
+var FAVORITES_METAFIELD = { namespace: "honsama", key: "favorites" };
 var FOLLOW_CAP = 300; // sanity ceiling; nobody follows 300 series
 
 async function adminGraphql(query, variables) {
@@ -650,11 +685,12 @@ async function adminGraphql(query, variables) {
     return response.data.data;
 }
 
-async function readFollowing(customerId) {
+async function readFollowing(customerId, mf) {
+    mf = mf || FOLLOW_METAFIELD;
     const data = await adminGraphql(
         `query Following($id: ID!) {
             customer(id: $id) {
-                metafield(namespace: "${FOLLOW_METAFIELD.namespace}", key: "${FOLLOW_METAFIELD.key}") { value }
+                metafield(namespace: "${mf.namespace}", key: "${mf.key}") { value }
             }
         }`,
         { id: `gid://shopify/Customer/${customerId}` }
@@ -667,7 +703,8 @@ async function readFollowing(customerId) {
     } catch (e) { return []; }
 }
 
-async function writeFollowing(customerId, keys) {
+async function writeFollowing(customerId, keys, mf) {
+    mf = mf || FOLLOW_METAFIELD;
     const data = await adminGraphql(
         `mutation SetFollowing($metafields: [MetafieldsSetInput!]!) {
             metafieldsSet(metafields: $metafields) {
@@ -678,8 +715,8 @@ async function writeFollowing(customerId, keys) {
         {
             metafields: [{
                 ownerId: `gid://shopify/Customer/${customerId}`,
-                namespace: FOLLOW_METAFIELD.namespace,
-                key: FOLLOW_METAFIELD.key,
+                namespace: mf.namespace,
+                key: mf.key,
                 type: "list.single_line_text_field",
                 value: JSON.stringify(keys),
             }],
@@ -689,34 +726,36 @@ async function writeFollowing(customerId, keys) {
     if (errs.length) throw new Error(JSON.stringify(errs));
 }
 
-// Shared toggle: add=true → follow, add=false → unfollow. Idempotent — the
-// response always reflects the resulting list, so the client can re-sync.
-function followToggleHandler(add) {
+// Shared toggle: add=true → follow/favorite, add=false → un-. Idempotent —
+// the response always reflects the resulting list, so the client can re-sync.
+function seriesListToggleHandler(add, mf, verb) {
     return async function (req, res) {
         const seriesKey = String((req.body || {}).seriesKey || "").trim().toUpperCase();
         if (!SERIES_KEY_RE.test(seriesKey) || seriesKey.length > 32) {
             return res.status(400).json({ error: "Invalid seriesKey." });
         }
         if (!ADMIN_API_TOKEN) {
-            return res.status(503).json({ error: "Follow is not configured yet." });
+            return res.status(503).json({ error: `${verb} is not configured yet.` });
         }
         try {
-            let keys = await readFollowing(req.customerId);
+            let keys = await readFollowing(req.customerId, mf);
             const has = keys.indexOf(seriesKey) !== -1;
             if (add && !has) keys.push(seriesKey);
             if (!add && has) keys = keys.filter((k) => k !== seriesKey);
             if (keys.length > FOLLOW_CAP) {
-                return res.status(400).json({ error: "Following too many series." });
+                return res.status(400).json({ error: `Too many ${mf.key} series.` });
             }
             // Only write when something changed — saves a mutation on repeats.
-            if (add !== has) await writeFollowing(req.customerId, keys);
-            res.status(200).json({ ok: true, following: keys });
+            if (add !== has) await writeFollowing(req.customerId, keys, mf);
+            res.status(200).json({ ok: true, [mf.key]: keys });
         } catch (error) {
-            console.error(`proxy/${add ? "follow" : "unfollow"} error:`, error.response?.data || error.message);
-            res.status(502).json({ error: add ? "Failed to follow." : "Failed to unfollow." });
+            console.error(`proxy/${add ? "" : "un"}${verb.toLowerCase()} error:`, error.response?.data || error.message);
+            res.status(502).json({ error: `Failed to ${add ? "" : "un"}${verb.toLowerCase()}.` });
         }
     };
 }
+function followToggleHandler(add) { return seriesListToggleHandler(add, FOLLOW_METAFIELD, "Follow"); }
+function favoriteToggleHandler(add) { return seriesListToggleHandler(add, FAVORITES_METAFIELD, "Favorite"); }
 
 // ---- Drawer operations, signed + own-contract-only ----------------------
 // These four port the cart drawer off the unauthenticated legacy routes.
@@ -828,6 +867,11 @@ app.post("/proxy/follow", followToggleHandler(true));
 app.post("/proxy/unfollow", followToggleHandler(false));
 app.post("/api/appstle/follow", verifyAppProxy, followToggleHandler(true));
 app.post("/api/appstle/unfollow", verifyAppProxy, followToggleHandler(false));
+// Favorites (library pin-to-top) — same mechanics, honsama.favorites metafield.
+app.post("/proxy/favorite", favoriteToggleHandler(true));
+app.post("/proxy/unfavorite", favoriteToggleHandler(false));
+app.post("/api/appstle/favorite", verifyAppProxy, favoriteToggleHandler(true));
+app.post("/api/appstle/unfavorite", verifyAppProxy, favoriteToggleHandler(false));
 // Drawer operations (signed): /apps/appstle-proxy/box-* → here.
 app.get("/proxy/box-details", boxDetailsHandler);
 app.post("/proxy/box-remove", boxRemoveHandler);
