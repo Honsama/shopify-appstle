@@ -1,5 +1,11 @@
 # Honsama Shelf Digest
 
+> **⚠️ SHELVED 2026-07-19 — no ESP yet.** Ricky doesn't have Klaviyo, so this
+> pipeline is built + tested but not launched. Full context, revival options
+> (Klaviyo / other ESP / direct send), and the rendered sample are in
+> `honsama-app/DIGEST-EMAIL-BRIEF.md`. Everything below is written for the
+> Klaviyo path and applies as-is once an account exists.
+
 Monthly personalized email to active Monthly Manga Box subscribers:
 new volumes for the series they own/follow, top "catch up" series with
 progress bars, and shelf stats (including how many volumes their boxes
