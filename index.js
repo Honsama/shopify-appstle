@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const cors = require("cors");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 
 // Environment Variables (Securely stored in Vercel)
 const APPSTLE_API_KEY = process.env.APPSTLE_API_KEY;
@@ -64,29 +64,63 @@ function safeEqual(a, b) {
     return crypto.timingSafeEqual(ba, bb);
 }
 
-// MIGRATION NOTE: the theme's subscription cart drawer still calls /api/appstle/*
-// directly with no token. Enforcing the gate unconditionally would break it the
-// moment this deploys. So: APP_API_TOKEN unset = legacy passthrough (today's
-// behavior, no regression); APP_API_TOKEN set = enforced. Do NOT set the env var
-// until the drawer has been ported to the signed /proxy routes.
+// FAIL-CLOSED: the theme's subscription cart drawer now talks exclusively to
+// the signed App Proxy routes (/apps/appstle-proxy/* → SIGNED_PATHS below),
+// so nothing legitimate depends on the legacy contractId-accepting routes
+// being open. If APP_API_TOKEN is unset, legacy routes are DENIED — an unset
+// env var must never mean "everyone on the internet can mutate subscriptions".
 function requireAppToken(req, res, next) {
     // /box and /box-add live under /api/appstle only because the store's App
     // Proxy ("Appstle API Connector Honsama") already targets this prefix —
-    // they carry their own auth (Shopify's App Proxy signature), so the
-    // bearer gate must never apply to them.
-    // Signed App Proxy routes carry their own auth (Shopify HMAC signature +
+    // they carry their own auth (Shopify's App Proxy signature +
     // logged_in_customer_id) — the bearer gate must never apply to them.
     var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow"];
     if (SIGNED_PATHS.indexOf(req.path) !== -1) return next();
     if (!process.env.APP_API_TOKEN) {
-        console.warn("APP_API_TOKEN not set - /api/appstle is running UNGATED (legacy mode).");
-        return next();
+        console.warn("APP_API_TOKEN not set - denying legacy /api/appstle request (fail-closed).");
+        return res.status(401).json({ error: "Unauthorized." });
     }
     const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
     if (!token || !safeEqual(token, process.env.APP_API_TOKEN)) {
         return res.status(401).json({ error: "Unauthorized." });
     }
     next();
+}
+
+// 🔒 Only ever talk OAuth to a real *.myshopify.com domain. Without this,
+// /auth is an open redirect and /auth/callback will POST the app's client
+// secret to whatever host an attacker puts in ?shop= (secret exfiltration).
+function isValidShopDomain(shop) {
+    return typeof shop === "string" && /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop);
+}
+
+// Stateless CSRF state for OAuth (no DB on serverless): ts.hmac(ts), verified
+// on callback within a 10-minute window.
+function makeOauthState() {
+    const ts = Date.now().toString();
+    const sig = crypto.createHmac("sha256", SHOPIFY_API_SECRET).update(ts).digest("hex");
+    return ts + "." + sig;
+}
+function verifyOauthState(state) {
+    if (typeof state !== "string") return false;
+    const parts = state.split(".");
+    if (parts.length !== 2) return false;
+    const expected = crypto.createHmac("sha256", SHOPIFY_API_SECRET).update(parts[0]).digest("hex");
+    if (!safeEqual(parts[1], expected)) return false;
+    return Math.abs(Date.now() - parseInt(parts[0], 10)) < 10 * 60 * 1000;
+}
+
+// Verify the hmac query param Shopify signs onto the OAuth callback:
+// HMAC-SHA256 over the sorted query string minus hmac, keyed by the secret.
+function verifyShopifyHmac(query) {
+    const { hmac, ...rest } = query;
+    if (!hmac) return false;
+    const message = Object.keys(rest)
+        .sort()
+        .map((k) => `${k}=${rest[k]}`)
+        .join("&");
+    const digest = crypto.createHmac("sha256", SHOPIFY_API_SECRET).update(message).digest("hex");
+    return safeEqual(digest, hmac);
 }
 
 // 🔑 Every route below ultimately calls Appstle's external API — fail fast and
@@ -104,11 +138,11 @@ app.use("/api/appstle", requireAppToken, requireAppstleKey);
 // ✅ Shopify OAuth Installation Route
 app.get("/auth", (req, res) => {
     const shop = req.query.shop;
-    if (!shop) {
-        return res.status(400).send("Missing shop parameter.");
+    if (!isValidShopDomain(shop)) {
+        return res.status(400).send("Invalid shop parameter.");
     }
 
-    const state = crypto.randomBytes(16).toString("hex");
+    const state = makeOauthState();
     // Shopify requires redirect_uri's host to match the app's configured URL
     // (shopify-appstle.vercel.app). If APP_URL is unset the old template made
     // "undefined/auth/callback" → invalid_request. Fall back to the request host.
@@ -133,10 +167,21 @@ app.get("/auth", (req, res) => {
 
 // ✅ OAuth Callback (Secure Token Exchange)
 app.get("/auth/callback", async (req, res) => {
-    const { shop, code } = req.query;
+    const { shop, code, state } = req.query;
 
     if (!shop || !code) {
         return res.status(400).send("Invalid parameters.");
+    }
+    // Never exchange (or even talk to) a host that isn't a myshopify domain —
+    // the exchange request carries the client secret.
+    if (!isValidShopDomain(shop)) {
+        return res.status(400).send("Invalid shop parameter.");
+    }
+    if (!verifyOauthState(state)) {
+        return res.status(403).send("Invalid or expired state parameter.");
+    }
+    if (!verifyShopifyHmac(req.query)) {
+        return res.status(403).send("HMAC validation failed.");
     }
 
     try {
@@ -796,6 +841,16 @@ app.post("/api/appstle/box-discount", verifyAppProxy, requireAppstleKey, boxDisc
 // ✅ Error Handling for Undefined Routes
 app.use((req, res) => {
     res.status(404).send("404: NOT_FOUND");
+});
+
+// ✅ Error middleware — CORS rejections (and any other middleware throw) get a
+// clean 403/500 JSON instead of Express's default HTML stack trace page.
+app.use((err, req, res, next) => {
+    if (err && err.message === "Not allowed by CORS") {
+        return res.status(403).json({ error: "Origin not allowed." });
+    }
+    console.error("Unhandled error:", err && err.message);
+    res.status(500).json({ error: "Internal server error." });
 });
 
 // ✅ Expose the app as a Vercel Serverless Function
