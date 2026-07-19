@@ -632,13 +632,17 @@ async function ownedHandler(req, res) {
                 (o.lineItems?.nodes || []).forEach((li) => {
                     if (li.sku) skus.push(li.sku);
                     // Monthly Manga Box line → credit the shipped box's featured manga.
-                    // Billing runs ~the 21st for the NEXT month's box, so the box month
-                    // = month of (order date + 10 days) — shifts 21st-31st forward,
-                    // keeps 1st-20th in place. Matches the storefront cutoff copy
-                    // ("subscribe by July 21st ... ships in August").
+                    // Box month = BILLING MONTH + 1 ("May box billed in April"; the
+                    // storefront cutoff copy says subscribe by the 21st for next
+                    // month's box). Rebills cluster on the 21st with Appstle
+                    // stragglers into the 22nd, so the boundary is day <= 22 ->
+                    // +1 month; day >= 23 -> +2 (the "box in ~6 weeks" case).
+                    // Dates shifted -7h to approximate store time (PDT).
                     if (li.product?.id?.endsWith(`/${BOX_PRODUCT_ID}`)) {
-                        const d = new Date(new Date(o.createdAt).getTime() + 10 * 86400 * 1000);
-                        const month = d.toISOString().slice(0, 7);
+                        const d = new Date(new Date(o.createdAt).getTime() - 7 * 3600 * 1000);
+                        const delta = d.getUTCDate() <= 22 ? 1 : 2;
+                        const midx = d.getUTCMonth() + delta; // 0-based month index, may overflow year
+                        const month = `${d.getUTCFullYear() + Math.floor(midx / 12)}-${String((midx % 12) + 1).padStart(2, "0")}`;
                         if (li.variant?.id?.endsWith(`/${BOX_VARIANT_2MANGA_ID}`)) boxMonths2.add(month);
                         else boxMonths.add(month);
                     }
