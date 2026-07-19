@@ -1,0 +1,127 @@
+<!-- Honsama Shelf Digest — Klaviyo flow email template.
+     Paste into a Klaviyo flow email (Text/HTML source editor), triggered by
+     the "Shelf Digest" metric. Uses event properties from send-klaviyo.js:
+       event.new_releases[] {series, volume, title, url, image, price, reason}
+       event.behind[]       {series, owned, total, behind, pct, favorite, cover, url}
+       event.stats          {series, volumes, from_boxes, up_to_date, behind_total}
+     Suggested subject:  Your shelf grew this month, {{ person.first_name|default:'reader' }} 📚
+     Preview text:       New volumes for your series + what your box added
+-->
+<div style="margin:0;padding:0;background-color:#fdf2e2;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf2e2;">
+  <tr><td align="center" style="padding:28px 12px;">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;">
+
+      <!-- Header -->
+      <tr><td align="center" style="padding:0 0 6px;">
+        <div style="font-family:Georgia,'Times New Roman',serif;font-size:30px;font-weight:bold;color:#821e1d;letter-spacing:1px;">HONSAMA</div>
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#8a6a55;padding-top:2px;">Your shelf this month</div>
+      </td></tr>
+
+      <!-- Greeting + stats strip -->
+      <tr><td style="padding:18px 0 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:14px;">
+          <tr><td style="padding:20px 22px 14px;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#35221b;line-height:1.5;">
+            Hey {{ person.first_name|default:'reader' }} — here's what happened on your shelf.
+          </td></tr>
+          <tr><td style="padding:0 22px 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
+                  <div style="font-size:24px;font-weight:bold;color:#35221b;">{{ event.stats.volumes }}</div>
+                  <div style="font-size:11px;color:#8a6a55;">volumes collected</div>
+                </td>
+                <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
+                  <div style="font-size:24px;font-weight:bold;color:#821e1d;">{{ event.stats.from_boxes }}</div>
+                  <div style="font-size:11px;color:#8a6a55;">from your boxes 📦</div>
+                </td>
+                <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
+                  <div style="font-size:24px;font-weight:bold;color:#185e13;">{{ event.stats.up_to_date }}</div>
+                  <div style="font-size:11px;color:#8a6a55;">series up to date</div>
+                </td>
+              </tr>
+            </table>
+          </td></tr>
+        </table>
+      </td></tr>
+
+      {% if event.new_releases %}
+      <!-- New releases for your series -->
+      <tr><td style="padding:22px 2px 8px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;letter-spacing:1px;color:#dd1d1d;">
+        ★ NEW THIS MONTH — FOR YOUR SERIES
+      </td></tr>
+      {% for item in event.new_releases %}
+      <tr><td style="padding:0 0 10px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:12px;">
+          <tr>
+            <td width="66" style="padding:12px 0 12px 14px;" valign="top">
+              <a href="{{ item.url }}"><img src="{{ item.image }}" width="52" alt="{{ item.series }}" style="display:block;width:52px;border-radius:6px;border:0;"></a>
+            </td>
+            <td style="padding:12px 10px;font-family:Arial,Helvetica,sans-serif;" valign="middle">
+              <div style="font-size:14px;font-weight:bold;color:#35221b;">{{ item.series }} — Vol. {{ item.volume }}</div>
+              <div style="font-size:12px;color:#8a6a55;padding-top:3px;">Just released · {{ item.reason }}</div>
+            </td>
+            <td width="120" align="right" style="padding:12px 14px 12px 0;" valign="middle">
+              <a href="{{ item.url }}" style="display:inline-block;background-color:#821e1d;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;text-decoration:none;padding:10px 14px;border-radius:8px;">Add to my box</a>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+      {% endfor %}
+      {% endif %}
+
+      {% if event.behind %}
+      <!-- Catch up -->
+      <tr><td style="padding:16px 2px 8px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;letter-spacing:1px;color:#dd1d1d;">
+        ↗ CATCH UP ON YOUR SHELF
+      </td></tr>
+      {% for s in event.behind %}
+      <tr><td style="padding:0 0 10px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:12px;">
+          <tr>
+            <td width="56" style="padding:12px 0 12px 14px;" valign="top">
+              <a href="{{ s.url }}"><img src="{{ s.cover }}" width="42" alt="{{ s.series }}" style="display:block;width:42px;border-radius:5px;border:0;"></a>
+            </td>
+            <td style="padding:12px 14px;font-family:Arial,Helvetica,sans-serif;" valign="middle">
+              <div style="font-size:14px;font-weight:bold;color:#35221b;">{% if s.favorite %}★ {% endif %}{{ s.series }}
+                <span style="font-weight:normal;font-size:12px;color:#8a6a55;">&nbsp;{{ s.owned }} / {{ s.total }}</span></div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:7px;"><tr>
+                <td style="background-color:#f6e8d2;border-radius:4px;height:7px;font-size:0;line-height:0;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" width="{{ s.pct }}%" style="width:{{ s.pct }}%;"><tr>
+                    <td style="background-color:#821e1d;border-radius:4px;height:7px;font-size:0;line-height:0;">&nbsp;</td>
+                  </tr></table>
+                </td>
+              </tr></table>
+              <div style="font-size:12px;color:#821e1d;font-weight:bold;padding-top:6px;">
+                <a href="{{ s.url }}" style="color:#821e1d;text-decoration:none;">{{ s.behind }} behind — add them to your next box →</a>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Cutoff reminder + CTA -->
+      <tr><td align="center" style="padding:20px 0 6px;">
+        <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+          <td align="center" style="background-color:#821e1d;border-radius:10px;">
+            <a href="https://honsama.com/pages/my-library" style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;padding:14px 34px;">Open My Library</a>
+          </td>
+        </tr></table>
+      </td></tr>
+      <tr><td align="center" style="padding:8px 20px 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#8a6a55;line-height:1.5;">
+        Anything you add before the <strong style="color:#821e1d;">21st</strong> ships in next month's box — one package, no extra shipping.
+      </td></tr>
+
+      <!-- Footer -->
+      <tr><td align="center" style="padding:26px 20px 0;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#b09a88;line-height:1.6;">
+        Honsama · Newly-released manga, monthly<br>
+        You're receiving this because you're a Monthly Manga Box subscriber.<br>
+        {% unsubscribe_link %}
+      </td></tr>
+
+    </table>
+  </td></tr>
+</table>
+</div>
