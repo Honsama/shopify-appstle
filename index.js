@@ -2,6 +2,33 @@ const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
 const cors = require("cors");
+const https = require("https");
+
+// ---------------------------------------------------------------------------
+// TRANSPORT DEFAULTS (2026-08-20)
+//
+// KEEP-ALIVE. Every axios call here opened a fresh TCP+TLS connection to
+// subscription-admin.appstle.com. Measured handshake cost is 25-55ms (TLS
+// complete at 30-80ms on a cold socket), so a warm instance paid that on every
+// add, remove, details read and follow toggle. One agent, reused for the life
+// of the instance, removes it for every call after the first.
+//
+// Worth being honest about the size: this is tens of milliseconds, not the
+// seconds anyone is chasing. box-details (one Appstle GET) returns in
+// 413-609ms while box-add (one Appstle PUT — same code path, same auth, same
+// call count) takes 3,000-4,813ms. That ~2.5s gap is Appstle-side and nothing
+// in this file reaches it.
+//
+// TIMEOUT. There was none, so a hung upstream pinned the function until the
+// platform killed it, with no useful error. 20s is deliberately generous: the
+// slowest add observed is 4.8s, and cutting a WRITE short is worse than
+// waiting — the contract edit may still land while the client is told it
+// failed. This only fires on a genuinely stuck call, and turns an opaque
+// platform timeout into a clean 502.
+// ---------------------------------------------------------------------------
+const keepAliveAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
+axios.defaults.httpsAgent = keepAliveAgent;
+axios.defaults.timeout = 20000;
 
 const app = express();
 app.use(express.json({ limit: "100kb" }));
