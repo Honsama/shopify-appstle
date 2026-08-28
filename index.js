@@ -716,49 +716,91 @@ async function adminGraphql(query, variables) {
     return response.data.data;
 }
 
+// Returns { keys, digest }. The digest is Shopify's optimistic-concurrency
+// token for this metafield — hand it back on the write and the mutation is
+// rejected if anything else changed the value in between. See the race note
+// on seriesListToggleHandler.
 async function readFollowing(customerId, mf) {
     mf = mf || FOLLOW_METAFIELD;
     const data = await adminGraphql(
         `query Following($id: ID!) {
             customer(id: $id) {
-                metafield(namespace: "${mf.namespace}", key: "${mf.key}") { value }
+                metafield(namespace: "${mf.namespace}", key: "${mf.key}") { value compareDigest }
             }
         }`,
         { id: `gid://shopify/Customer/${customerId}` }
     );
-    const raw = data?.customer?.metafield?.value;
-    if (!raw) return [];
+    const field = data?.customer?.metafield;
+    const digest = field?.compareDigest || null;
+    const raw = field?.value;
+    if (!raw) return { keys: [], digest: digest };
     try {
         const list = JSON.parse(raw);
-        return Array.isArray(list) ? list.filter((k) => typeof k === "string") : [];
-    } catch (e) { return []; }
+        return {
+            keys: Array.isArray(list) ? list.filter((k) => typeof k === "string") : [],
+            digest: digest,
+        };
+    } catch (e) { return { keys: [], digest: digest }; }
 }
 
-async function writeFollowing(customerId, keys, mf) {
+// Returns true on success, false if the metafield changed under us
+// (STALE_OBJECT) so the caller can re-read and retry. Any other userError is
+// still thrown — a conflict is routine, a validation failure is not.
+//
+// `digest` is omitted when the metafield does not exist yet: there is nothing
+// to compare against on a first write. Two simultaneous FIRST writes for the
+// same customer can therefore still clobber each other, which is the one gap
+// this leaves. It needs a customer with zero follows tapping two hearts in the
+// same instant, and the loser is one entry rather than the whole list.
+async function writeFollowing(customerId, keys, mf, digest) {
     mf = mf || FOLLOW_METAFIELD;
+    const entry = {
+        ownerId: `gid://shopify/Customer/${customerId}`,
+        namespace: mf.namespace,
+        key: mf.key,
+        type: "list.single_line_text_field",
+        value: JSON.stringify(keys),
+    };
+    if (digest) entry.compareDigest = digest;
     const data = await adminGraphql(
         `mutation SetFollowing($metafields: [MetafieldsSetInput!]!) {
             metafieldsSet(metafields: $metafields) {
                 metafields { id }
-                userErrors { field message }
+                userErrors { field message code }
             }
         }`,
-        {
-            metafields: [{
-                ownerId: `gid://shopify/Customer/${customerId}`,
-                namespace: mf.namespace,
-                key: mf.key,
-                type: "list.single_line_text_field",
-                value: JSON.stringify(keys),
-            }],
-        }
+        { metafields: [entry] }
     );
     const errs = data?.metafieldsSet?.userErrors || [];
-    if (errs.length) throw new Error(JSON.stringify(errs));
+    if (!errs.length) return true;
+    if (errs.some((e) => e.code === "STALE_OBJECT")) return false;
+    throw new Error(JSON.stringify(errs));
 }
 
 // Shared toggle: add=true → follow/favorite, add=false → un-. Idempotent —
 // the response always reflects the resulting list, so the client can re-sync.
+//
+// THIS USED TO LOSE WRITES, AND IT WAS OBSERVED IN THE WILD (28 Aug 2026).
+// It was a plain read-modify-write: read the list, change one entry, then
+// metafieldsSet the WHOLE list back. metafieldsSet is a full replace, so two
+// requests overlapping anywhere in that window both read the old list and the
+// second one silently discards the first one's entry. Two favourites vanished
+// from a real customer's metafield this way; two toggles ~1.2s apart were
+// enough, because a Shopify Admin round trip plus a cold Vercel start is
+// easily wider than that.
+//
+// The fix is Shopify's own optimistic-concurrency token: read compareDigest
+// alongside the value, pass it back on the write, and the mutation is rejected
+// with STALE_OBJECT if anything changed in between. Verified against the live
+// API before writing this: a stale digest returns
+// "The resource has been updated since it was loaded."
+//
+// On conflict we RE-READ and retry rather than fail, so the caller still gets
+// the outcome it asked for. Retries are bounded and backed off; exhausting
+// them returns 409 (retry-able) rather than 502 (broken), because the request
+// was valid and the client is safe to send it again.
+const TOGGLE_ATTEMPTS = 4;
+
 function seriesListToggleHandler(add, mf, verb) {
     return async function (req, res) {
         const seriesKey = String((req.body || {}).seriesKey || "").trim().toUpperCase();
@@ -769,16 +811,29 @@ function seriesListToggleHandler(add, mf, verb) {
             return res.status(503).json({ error: `${verb} is not configured yet.` });
         }
         try {
-            let keys = await readFollowing(req.customerId, mf);
-            const has = keys.indexOf(seriesKey) !== -1;
-            if (add && !has) keys.push(seriesKey);
-            if (!add && has) keys = keys.filter((k) => k !== seriesKey);
-            if (keys.length > FOLLOW_CAP) {
-                return res.status(400).json({ error: `Too many ${mf.key} series.` });
+            for (let attempt = 1; attempt <= TOGGLE_ATTEMPTS; attempt++) {
+                const { keys, digest } = await readFollowing(req.customerId, mf);
+                const has = keys.indexOf(seriesKey) !== -1;
+
+                // Already in the desired state — nothing to write, and no race
+                // to lose. Return the list so the client can re-sync anyway.
+                if (add === has) return res.status(200).json({ ok: true, [mf.key]: keys });
+
+                const next = add ? keys.concat([seriesKey]) : keys.filter((k) => k !== seriesKey);
+                if (next.length > FOLLOW_CAP) {
+                    return res.status(400).json({ error: `Too many ${mf.key} series.` });
+                }
+
+                if (await writeFollowing(req.customerId, next, mf, digest)) {
+                    return res.status(200).json({ ok: true, [mf.key]: next });
+                }
+
+                // Someone else wrote first. Re-read and rebuild from THEIR list
+                // rather than replaying ours, which is the whole point.
+                console.warn(`proxy/${verb.toLowerCase()}: stale metafield, retry ${attempt}/${TOGGLE_ATTEMPTS}`);
+                await new Promise((r) => setTimeout(r, 80 * attempt));
             }
-            // Only write when something changed — saves a mutation on repeats.
-            if (add !== has) await writeFollowing(req.customerId, keys, mf);
-            res.status(200).json({ ok: true, [mf.key]: keys });
+            res.status(409).json({ error: `${verb} is busy, please try again.` });
         } catch (error) {
             console.error(`proxy/${add ? "" : "un"}${verb.toLowerCase()} error:`, error.response?.data || error.message);
             res.status(502).json({ error: `Failed to ${add ? "" : "un"}${verb.toLowerCase()}.` });
