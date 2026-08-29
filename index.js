@@ -686,8 +686,28 @@ async function ownedHandler(req, res) {
             boxMonths2: Array.from(boxMonths2).sort(),
         });
     } catch (error) {
+        // FAIL SOFT - NEVER RETURN A 5xx FROM THIS ROUTE.
+        //
+        // This endpoint is only ever reached through Shopify's App Proxy, and
+        // Shopify REPLACES an upstream 5xx with its own storefront error page.
+        // Measured on 28 Aug 2026 while this returned 502: every My Library
+        // page load pulled 675KB of HTML from /apps/appstle-proxy/owned and
+        // threw it away. The endpoint failed in a way that cost real bandwidth
+        // on every view instead of failing quietly.
+        //
+        // Degrading to `available:false` is already the contract for the
+        // not-configured case a few lines above, and the client is built for
+        // it: the bookshelf adopts this response only when `available` is true
+        // AND the list is non-empty, so it keeps its Liquid-rendered order
+        // history untouched. That fallback is correct, just capped at roughly
+        // 50 orders - and that is what a broken or under-scoped ADMIN_API_TOKEN
+        // should cost: one log line, not 675KB per page view.
+        //
+        // The console.error is the diagnostic. If a shelf is silently capped,
+        // read it - it carries the Admin API's own message, which distinguishes
+        // an expired token from a missing read_all_orders scope.
         console.error("proxy/owned error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Failed to read order history." });
+        res.status(200).json({ available: false, skus: [] });
     }
 }
 
