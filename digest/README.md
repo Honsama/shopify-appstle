@@ -1,10 +1,11 @@
 # Honsama Shelf Digest
 
-> **⚠️ SHELVED 2026-07-19 — no ESP yet.** Ricky doesn't have Klaviyo, so this
-> pipeline is built + tested but not launched. Full context, revival options
-> (Klaviyo / other ESP / direct send), and the rendered sample are in
-> `honsama-app/DIGEST-EMAIL-BRIEF.md`. Everything below is written for the
-> Klaviyo path and applies as-is once an account exists.
+> **🚀 LAUNCHING VIA RESEND (2026-09-01)** — shelved 2026-07-19 on "no ESP";
+> revived as a direct-send project at $0 (Resend free tier) instead of Klaviyo.
+> Setup Week 4 (Sep 21–27), first send Oct 16. Rule, setup checklist, SOP and
+> the 3-runs gate live in `HonsamaOps/Honsama Email Automation/resend_digest/README.md`.
+> `send-klaviyo.js` stays as the dormant alternative; `send-resend.js` replaces it.
+> The Klaviyo-specific steps below remain for reference until the rewrite lands.
 
 Monthly personalized email to active Monthly Manga Box subscribers:
 new volumes for the series they own/follow, top "catch up" series with
