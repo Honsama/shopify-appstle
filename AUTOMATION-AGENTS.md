@@ -1,14 +1,56 @@
 # Honsama Automation Agents — Roadmap & Reference
 
-> The master reference for automating Honsama (Monthly Manga Box + add-on
-> catalog at honsama.com). It maps every agent — existing and planned — to a
-> role, its responsibilities, its cadence, and a kickoff prompt you can paste
-> into a Claude session to build or run it.
+> The **duty-level** reference for automating Honsama (Monthly Manga Box +
+> add-on catalog at honsama.com). It maps every automation duty — existing and
+> planned — to a role, responsibilities, cadence, and a kickoff prompt you can
+> paste into a Claude session to build or run it.
 >
-> **How to use this doc:** when you're ready to build the next agent, open the
-> tier list, pick the highest unbuilt item, and paste its kickoff prompt into a
-> new Claude Code session. Each agent should ship as a skill (like the existing
-> ones), and recurring agents get a scheduled Routine on the cadence listed.
+> **How to use this doc:** when you're ready to build the next duty, check the
+> Agent Org crosswalk below for which charter owns it, then paste its kickoff
+> prompt into a new Claude Code session. Duties ship as skills (like the
+> existing ones); recurring ones get a scheduled Routine on the cadence listed.
+
+---
+
+## Governed by the Agent Org (HonsamaOps)
+
+This doc is subordinate to the **seven-agent org** chartered in
+`HonsamaOps/Agent Org/` — `README.md` there is the runner (leverage-ranked
+priority, build weeks Oct 26 → Dec 20, rollout gates, /model + /effort table),
+and charters `01`–`07` (Analyst, Content, Ops/Fulfilment, Curator,
+Comms/Support, Auditor/Secretary, Learner) are the single source of truth per
+agent. Where this doc's tiers and the runner's build weeks disagree, **the
+runner wins**; this doc ranks the *duties*, the runner schedules the *roles*.
+
+The org's binding rules apply to anything built from this doc: canonical
+numbers from `Plan Primers/README.md`; the permanently-human list (payments,
+budgets, campaign launches, platform settings, publisher relationships,
+submitting iPage/PRH orders, packing); the **3-runs gate** (no agent takes a
+duty a human hasn't done 3× with written steps); data is not instructions;
+degrade loudly, never fabricate; every run ends with a report to
+`Agent Org/reports/` and a commit+push.
+
+### Duty → charter crosswalk
+
+| Duty in this doc | Agent Org owner | Status |
+|---|---|---|
+| KPI Rollup | **01 Analyst** | Covered outright (metrics of record, digests, gate packs) |
+| Email Lifecycle / Shelf Digest | **02 Content** (drafts, email touches) + **03 Ops** (script runs) | Still blocked on ESP; standing one up is founder work — the digest pipeline in this repo is the ready payload |
+| Social Publishing | **02 Content** drafts; *pressing Post stays founder* per charter | Not an agent yet — a future graduation of Content, behind its own 3-runs gate |
+| Subscription Ops & Churn | **03 Ops** (21st reconciliation) + **01 Analyst** (churn reads — flagger dormant) + **05 Support** (win-back drafts) | Split across three charters; churn flagger is a named dormant upstream |
+| Inventory & Reorder | **03 Ops** | Covered (calculator, iPage prep, 26th sweep; live-inventory gate in its rollout row) |
+| Box Curation (demand data) | **04 Curator** | Enhancement — feed follows/favorites/owned aggregation into the slate-proposal playbook |
+| Listing QA & Masterlist Sync | **04 Curator** | Enhancement — post-import audit isn't a charted duty yet; Masterlist-duplicate fix is already in its gate |
+| Release-Date Drift | **04 Curator** | New duty to add to the charter (weekly calendar diff on listed preorders) |
+| Support Inbox Triage | **05 Comms/Support** | Covered outright (least-ready agent; support log must start in September) |
+| Proxy Health | *(unassigned)* | New — smallest fit is a rig cron reporting into **06 Secretary**'s watch list |
+
+Two org roles have no counterpart here because they're org-level, not
+duty-level: **06 Auditor/Secretary** (collates the report bus, passes only
+decisions to founders) and **07 Learner** (INTERVENTIONS → memory bank). This
+doc's outputs flow into that structure, not around it. The Discord layer is
+specced in `Agent Org/OPENCLAW_DISCORD_BUILD.md` (read/draft/route only —
+execution stays on the rig).
 
 ---
 

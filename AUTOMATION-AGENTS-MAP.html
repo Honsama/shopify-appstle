@@ -99,6 +99,14 @@
   .cl{border:1.4px solid var(--indigo); background:var(--indigo-tint);}
   .cs{border:1.4px dashed var(--indigo);}
   .t3 .cp{border-color:var(--muted);}
+  .xwalk-wrap{overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--surface);}
+  .xwalk{border-collapse:collapse; width:100%; min-width:560px; font-size:12.5px;}
+  .xwalk th{font:600 10.5px "IBM Plex Mono",monospace; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--muted); text-align:left; padding:10px 14px; border-bottom:1px solid var(--line);}
+  .xwalk td{padding:8px 14px; border-bottom:1px solid var(--line); vertical-align:top;}
+  .xwalk tbody tr:last-child td{border-bottom:none;}
+  .xwalk td:nth-child(3){color:var(--muted);}
+  .xwalk b{font-weight:600; color:var(--verm);}
   .deps{font-size:12.5px; color:var(--muted); margin:18px 2px 0; padding-left:18px;}
   .deps li{margin-bottom:5px;}
   .deps b{color:var(--ink); font-weight:600;}
@@ -114,7 +122,8 @@
   <p class="lede">How ten planned agents plug into the machine that already runs the
   Monthly Manga Box — every one of them a spoke off the same Shopify store,
   with Ricky as the only decision point between demand data and what ships.</p>
-  <p class="meta">companion to <code>AUTOMATION-AGENTS.md</code> · shopify-appstle · Sept 2026</p>
+  <p class="meta">companion to <code>AUTOMATION-AGENTS.md</code> · shopify-appstle · Sept 2026<br>
+  governed by <code>HonsamaOps/Agent Org/README.md</code> — the seven-charter runner schedules the roles; this page maps the duties</p>
 </header>
 
 <h2>The system, end to end</h2>
@@ -345,10 +354,12 @@ The dashed bus along the bottom is the daily/weekly read path off store data.</p
   <text class="th" x="760" y="329" text-anchor="middle" style="font-size:13px">RICKY</text>
   <text class="ts" x="760" y="344" text-anchor="middle">final call</text>
 </svg>
-<figcaption>Every agent is a spoke off the store; the only human hop sits between
+<figcaption>Every duty is a spoke off the store; the only human hop sits between
 Box Curation's ranked shortlist and the Content Studio. Thinner interactions —
 slip notices and the reveal-announcement email routing through Email Lifecycle —
-are omitted for legibility; the companion doc lists them.</figcaption>
+are omitted for legibility. In the Agent Org view, the Auditor/Secretary and the
+report bus sit between all of these and Ricky: specialists write reports, the
+secretary passes only decisions down.</figcaption>
 </figure>
 
 <div class="legend">
@@ -363,8 +374,10 @@ are omitted for legibility; the companion doc lists them.</figcaption>
 </div>
 
 <h2>Build order</h2>
-<p class="h2sub">Top to bottom. Tier 1 unlocks finished work and data only Honsama has;
-Tier 2 stops daily revenue leaks; Tier 3 is polish once the machine hums.</p>
+<p class="h2sub">Top to bottom, ranking the <em>duties</em>. Build <em>weeks</em> come from the
+Agent Org runner's leverage-ranked №1–7 (Analyst → Learner, Oct 26 – Dec 20) —
+where they disagree, the runner wins. Every duty ships behind the org's 3-runs
+gate and reports into the <code>Agent Org/reports/</code> bus.</p>
 
 <div class="tier t1">
   <div class="tier-tag"><span class="tier-num">T1</span>
@@ -409,11 +422,38 @@ Tier 2 stops daily revenue leaks; Tier 3 is polish once the machine hums.</p>
   </div>
 </div>
 
+<h2>Where each duty lives in the Agent Org</h2>
+<p class="h2sub">The seven charters in <code>HonsamaOps/Agent Org/</code> are the single source
+of truth per agent. This crosswalk maps the duties above onto their charter owners.</p>
+
+<div class="xwalk-wrap">
+<table class="xwalk">
+  <thead><tr><th>Duty (this page)</th><th>Charter owner</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>KPI Rollup</td><td><b>01 Analyst</b></td><td>covered outright</td></tr>
+    <tr><td>Email Lifecycle / Shelf Digest</td><td><b>02 Content</b> + <b>03 Ops</b></td><td>blocked on ESP — this repo's digest is the ready payload</td></tr>
+    <tr><td>Social Publishing</td><td><b>02 Content</b> drafts · founder posts</td><td>future graduation, own 3-runs gate</td></tr>
+    <tr><td>Subscription Ops &amp; Churn</td><td><b>03 Ops</b> + <b>01 Analyst</b> + <b>05 Support</b></td><td>split; churn flagger is a dormant upstream</td></tr>
+    <tr><td>Inventory &amp; Reorder</td><td><b>03 Ops</b></td><td>covered — live-inventory setup in its gate</td></tr>
+    <tr><td>Box Curation (demand data)</td><td><b>04 Curator</b></td><td>enhancement to the slate-proposal playbook</td></tr>
+    <tr><td>Listing QA &amp; Masterlist Sync</td><td><b>04 Curator</b></td><td>enhancement — post-import audit not charted yet</td></tr>
+    <tr><td>Release-Date Drift</td><td><b>04 Curator</b></td><td>new duty to add to the charter</td></tr>
+    <tr><td>Support Inbox Triage</td><td><b>05 Comms/Support</b></td><td>covered outright — support log starts September</td></tr>
+    <tr><td>Proxy Health</td><td><em>unassigned</em> → <b>06 Secretary</b> watch list</td><td>new — smallest fit is a rig cron</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="h2sub" style="margin-top:12px"><b>06 Auditor/Secretary</b> and <b>07 Learner</b> have no row
+because they're org-level: the secretary collates the report bus and passes only decisions to
+founders; the Learner turns interventions into the memory bank. Everything above flows into that
+structure. Discord layer: <code>Agent Org/OPENCLAW_DISCORD_BUILD.md</code> — read/draft/route only,
+execution stays on the rig.</p>
+
 <ul class="deps">
   <li><b>Curation feeds two ways:</b> its picks go to the Content Studio, its demand estimates set Inventory's stocking depth.</li>
   <li><b>Email Lifecycle unblocks others:</b> Subscription Ops' win-backs and Drift's slip notices need a send channel before their customer-facing half works.</li>
   <li><b>Two external prerequisites:</b> Support Triage waits on an inbox connector; Social Publishing waits on a scheduling-tool choice.</li>
 </ul>
 
-<footer>kickoff prompts, cadences &amp; full responsibilities: AUTOMATION-AGENTS.md · indigo = live · vermilion = planned · gold ◆ = Ricky signs off</footer>
+<footer>kickoff prompts &amp; responsibilities: AUTOMATION-AGENTS.md · org runner, charters 01–07, gates &amp; report bus: HonsamaOps/Agent Org/ · indigo = live · vermilion = planned · gold ◆ = founder signs off</footer>
 </div>
