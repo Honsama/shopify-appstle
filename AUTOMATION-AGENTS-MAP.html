@@ -1,0 +1,419 @@
+<title>Honsama Agent Map</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@600;700&family=Schibsted+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#F6F5F0; --surface:#FDFCF9; --ink:#20242E; --muted:#646C7E;
+    --line:#DEDBD1; --indigo:#33568A; --indigo-tint:#E6ECF4;
+    --verm:#BC4327; --verm-tint:#F8EDE8; --gold:#A97F2F;
+    --data-tint:#EFECE2; --edge:#8A8E97; --chip-on:#FDFCF9;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#14171E; --surface:#1B1F29; --ink:#E8E6DE; --muted:#9AA2B1;
+      --line:#2E3441; --indigo:#8AAEDC; --indigo-tint:#233349;
+      --verm:#E0704F; --verm-tint:#3A241D; --gold:#C9A45C;
+      --data-tint:#242837; --edge:#79808F; --chip-on:#14171E;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#14171E; --surface:#1B1F29; --ink:#E8E6DE; --muted:#9AA2B1;
+    --line:#2E3441; --indigo:#8AAEDC; --indigo-tint:#233349;
+    --verm:#E0704F; --verm-tint:#3A241D; --gold:#C9A45C;
+    --data-tint:#242837; --edge:#79808F; --chip-on:#14171E;
+  }
+  body{background:var(--bg); color:var(--ink);
+    font-family:"Schibsted Grotesk",system-ui,sans-serif; line-height:1.55;}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px;}
+  header{border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:30px;}
+  .eyebrow{font:500 11px "IBM Plex Mono",monospace; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--verm); margin:0 0 10px;}
+  h1{font-family:"Shippori Mincho",serif; font-weight:700; font-size:clamp(28px,4vw,40px);
+    margin:0 0 8px; text-wrap:balance;}
+  .lede{color:var(--muted); max-width:62ch; margin:0 0 6px; font-size:15px;}
+  .meta{font:400 11px "IBM Plex Mono",monospace; color:var(--muted);}
+  .meta code{color:var(--ink);}
+  h2{font-family:"Shippori Mincho",serif; font-weight:600; font-size:21px; margin:44px 0 4px;}
+  .h2sub{color:var(--muted); font-size:13.5px; margin:0 0 16px; max-width:70ch;}
+
+  .figwrap{overflow-x:auto; border:1px solid var(--line); border-radius:10px;
+    background:var(--surface); padding:18px 10px 8px;}
+  figure{margin:0;}
+  figure svg{display:block; min-width:1000px; max-width:100%; height:auto; margin:0 auto;}
+  figcaption{font-size:12.5px; color:var(--muted); padding:10px 14px 8px; max-width:90ch;}
+
+  /* SVG classes */
+  .box{fill:var(--surface); stroke-width:1.4; rx:6;}
+  .live{stroke:var(--indigo); fill:var(--indigo-tint);}
+  .shelf{stroke:var(--indigo); fill:var(--surface); stroke-dasharray:5 4;}
+  .plan{stroke:var(--verm); fill:var(--surface); stroke-dasharray:6 4;}
+  .plan1{fill:var(--verm-tint);}
+  .data{stroke:var(--muted); fill:var(--data-tint);}
+  .exb{stroke:var(--muted); fill:none; stroke-dasharray:2 3;}
+  .hubbox{stroke:var(--ink); fill:var(--surface); stroke-width:1.6;}
+  .edge{stroke:var(--edge); fill:none; stroke-width:1.3;}
+  .bus{stroke:var(--edge); fill:none; stroke-width:1.1; stroke-dasharray:3 4;}
+  .arrfill{fill:var(--edge);}
+  .tt{font:600 12.5px "Schibsted Grotesk",sans-serif; fill:var(--ink);}
+  .ts{font:400 9.5px "Schibsted Grotesk",sans-serif; fill:var(--muted);}
+  .te{font:500 9.5px "IBM Plex Mono",monospace; fill:var(--muted);}
+  .th{font:700 15px "Shippori Mincho",serif; fill:var(--ink); letter-spacing:.04em;}
+  .hl{font:500 9.5px "IBM Plex Mono",monospace; letter-spacing:.08em; fill:var(--ink);}
+  .hs{font:400 9px "Schibsted Grotesk",sans-serif; fill:var(--muted);}
+  .chipt{font:600 8.5px "IBM Plex Mono",monospace; letter-spacing:.05em;}
+  .c-live{fill:var(--indigo);} .c-live-t{fill:var(--chip-on);}
+  .c-shelf{fill:none; stroke:var(--indigo); stroke-width:1;} .c-shelf-t{fill:var(--indigo);}
+  .c-t1{fill:var(--verm);} .c-t1-t{fill:var(--chip-on);}
+  .c-t2{fill:none; stroke:var(--verm); stroke-width:1;} .c-t2-t{fill:var(--verm);}
+  .c-t3{fill:none; stroke:var(--muted); stroke-width:1;} .c-t3-t{fill:var(--muted);}
+  .signoff{fill:var(--gold);}
+  .ricky-outer{fill:none; stroke:var(--gold); stroke-width:1.2;}
+  .ricky-inner{fill:var(--surface); stroke:var(--ink); stroke-width:1.5;}
+
+  /* legend */
+  .legend{display:flex; flex-wrap:wrap; gap:10px 22px; align-items:center;
+    padding:14px 4px 2px; font-size:12px; color:var(--muted);}
+  .lg{display:inline-flex; align-items:center; gap:7px;}
+  .sw{width:22px; height:13px; border-radius:3px; flex:none;}
+  .sw-live{background:var(--indigo-tint); border:1.4px solid var(--indigo);}
+  .sw-shelf{border:1.4px dashed var(--indigo);}
+  .sw-plan{border:1.4px dashed var(--verm);}
+  .sw-data{background:var(--data-tint); border:1.4px solid var(--muted);}
+  .sw-ex{border:1.4px dashed var(--muted); border-radius:8px;}
+  .sw-bus{width:26px; height:0; border-top:1.4px dashed var(--edge); border-radius:0;}
+  .dia{width:8px; height:8px; background:var(--gold); transform:rotate(45deg); flex:none;}
+
+  /* build ladder */
+  .tier{display:grid; grid-template-columns:118px 1fr; gap:0 22px;
+    border:1px solid var(--line); border-radius:10px; background:var(--surface);
+    padding:18px 20px; margin-bottom:14px;}
+  .tier-tag{display:flex; flex-direction:column; gap:2px;}
+  .tier-num{font-family:"Shippori Mincho",serif; font-weight:700; font-size:26px; line-height:1;}
+  .t1 .tier-num{color:var(--verm);} .t2 .tier-num{color:var(--verm); opacity:.75;}
+  .t3 .tier-num{color:var(--muted);} .t0 .tier-num{color:var(--indigo);}
+  .tier-why{font-size:11.5px; color:var(--muted); line-height:1.4;}
+  .chips{display:flex; flex-wrap:wrap; gap:10px; align-content:flex-start;}
+  .chip{border-radius:6px; padding:8px 12px; max-width:230px;}
+  .chip b{display:block; font-size:12.5px; font-weight:600;}
+  .chip span{font-size:10.5px; color:var(--muted);}
+  .cp{border:1.4px dashed var(--verm);}
+  .cl{border:1.4px solid var(--indigo); background:var(--indigo-tint);}
+  .cs{border:1.4px dashed var(--indigo);}
+  .t3 .cp{border-color:var(--muted);}
+  .deps{font-size:12.5px; color:var(--muted); margin:18px 2px 0; padding-left:18px;}
+  .deps li{margin-bottom:5px;}
+  .deps b{color:var(--ink); font-weight:600;}
+  footer{margin-top:40px; border-top:1px solid var(--line); padding-top:14px;
+    font:400 11px "IBM Plex Mono",monospace; color:var(--muted);}
+  @media (prefers-reduced-motion: no-preference){ html{scroll-behavior:smooth;} }
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Honsama · Business Automation</p>
+  <h1>The Agent Map</h1>
+  <p class="lede">How ten planned agents plug into the machine that already runs the
+  Monthly Manga Box — every one of them a spoke off the same Shopify store,
+  with Ricky as the only decision point between demand data and what ships.</p>
+  <p class="meta">companion to <code>AUTOMATION-AGENTS.md</code> · shopify-appstle · Sept 2026</p>
+</header>
+
+<h2>The system, end to end</h2>
+<p class="h2sub">Solid indigo boxes run today. Dashed vermilion boxes are planned, chipped by build tier.
+The dashed bus along the bottom is the daily/weekly read path off store data.</p>
+
+<div class="figwrap">
+<figure>
+<svg viewBox="0 0 1090 860" role="img" aria-label="System map: all Honsama agents, live and planned, connected around a central Shopify store hub, with Ricky as the decision point between Box Curation and the Content Studio.">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="arrfill" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <!-- ======== edges (under nodes) ======== -->
+  <!-- e1 calendars -> intake -->
+  <path class="edge" d="M130,88 V168" marker-end="url(#arr)"/>
+  <text class="te" x="138" y="132">scrape monthly</text>
+  <!-- e2 intake -> hub -->
+  <path class="edge" d="M220,200 H428" marker-end="url(#arr)"/>
+  <text class="te" x="324" y="192" text-anchor="middle">import CSVs</text>
+  <!-- e3 QA -> hub -->
+  <path class="edge" d="M395,282 H428" marker-end="url(#arr)"/>
+  <!-- e4 QA -> masterlist -->
+  <path class="edge" d="M315,314 V384 H222" marker-end="url(#arr)"/>
+  <text class="te" x="322" y="352">appends new series</text>
+  <!-- e5 masterlist -> intake -->
+  <path class="edge" d="M130,360 V236" marker-end="url(#arr)"/>
+  <text class="te" x="138" y="302">series list</text>
+  <!-- e6 drift -> calendars (left margin) -->
+  <path class="edge" d="M40,478 H24 V64 H38" marker-end="url(#arr)"/>
+  <text class="te" x="17" y="272" transform="rotate(-90 17 272)" text-anchor="middle">re-scrapes weekly</text>
+  <!-- e7 drift -> hub -->
+  <path class="edge" d="M220,505 H428" marker-end="url(#arr)"/>
+  <text class="te" x="324" y="497" text-anchor="middle">fix slipped dates</text>
+  <!-- e8 box app -> hub -->
+  <path class="edge" d="M310,540 V522 H428" marker-end="url(#arr)"/>
+  <text class="te" x="352" y="534" text-anchor="middle">shelf writes</text>
+  <!-- e9 proxy health -> box app -->
+  <path class="edge" d="M200,564 H223" marker-end="url(#arr)"/>
+  <!-- e10 bus -->
+  <path class="bus" d="M520,570 V630 M120,630 H1000"/>
+  <path class="bus" d="M120,630 V648" marker-end="url(#arr)"/>
+  <path class="bus" d="M315,630 V648" marker-end="url(#arr)"/>
+  <path class="bus" d="M520,630 V648" marker-end="url(#arr)"/>
+  <path class="bus" d="M1000,630 V552" marker-end="url(#arr)"/>
+  <text class="te" x="700" y="622" text-anchor="middle">daily / weekly store reads · Admin API + ShopifyQL</text>
+  <!-- e11 hub -> curation -->
+  <path class="edge" d="M610,228 H668" marker-end="url(#arr)"/>
+  <text class="te" x="640" y="212" text-anchor="middle">demand</text>
+  <!-- e12 curation -> ricky -->
+  <path class="edge" d="M760,256 V287" marker-end="url(#arr)"/>
+  <text class="te" x="768" y="278">shortlist</text>
+  <!-- e13 ricky -> content -->
+  <path class="edge" d="M760,371 V408" marker-end="url(#arr)"/>
+  <text class="te" x="768" y="396">final 2–4</text>
+  <!-- e14 content -> social pub -->
+  <path class="edge" d="M850,438 H888" marker-end="url(#arr)"/>
+  <text class="te" x="869" y="428" text-anchor="middle">posts</text>
+  <!-- e15 social pub -> platforms -->
+  <path class="edge" d="M970,410 V91" marker-end="url(#arr)"/>
+  <text class="te" x="961" y="250" transform="rotate(-90 961 250)" text-anchor="middle">schedules · reveal window 16th–21st</text>
+  <!-- e16 curation -> inventory -->
+  <path class="edge" d="M850,215 H1066 V512 H1053" marker-end="url(#arr)"/>
+  <text class="te" x="1077" y="364" transform="rotate(90 1077 364)" text-anchor="middle">demand → stocking depth</text>
+  <!-- e17 digest -> email -->
+  <path class="edge" d="M610,678 H668" marker-end="url(#arr)"/>
+  <text class="te" x="640" y="670" text-anchor="middle">events</text>
+  <!-- e18 email -> inboxes -->
+  <path class="edge" d="M850,678 H888" marker-end="url(#arr)"/>
+  <text class="te" x="869" y="668" text-anchor="middle">16th</text>
+  <!-- e19 sub ops -> email -->
+  <path class="edge" d="M315,714 V740 H760 V708" marker-end="url(#arr)"/>
+  <text class="te" x="538" y="733" text-anchor="middle">win-back &amp; dunning drafts</text>
+  <!-- e20 kpi -> morning -->
+  <path class="edge" d="M120,714 V768" marker-end="url(#arr)"/>
+  <text class="te" x="128" y="746">headlines</text>
+  <!-- e21 inboxes <-> triage -->
+  <path class="edge" d="M970,708 V768" marker-start="url(#arr)" marker-end="url(#arr)"/>
+  <text class="te" x="960" y="742" text-anchor="end">mail ↕ replies</text>
+
+  <!-- ======== externals ======== -->
+  <rect class="exb" x="40" y="40" width="180" height="48" rx="14"/>
+  <text class="ts" x="130" y="60" text-anchor="middle" style="font-weight:500; fill:var(--ink); font-size:11.5px">Publisher calendars</text>
+  <text class="ts" x="130" y="76" text-anchor="middle">Viz · Kodansha · Yen · Seven Seas</text>
+
+  <rect class="exb" x="890" y="40" width="160" height="48" rx="14"/>
+  <text class="ts" x="970" y="60" text-anchor="middle" style="font-weight:500; fill:var(--ink); font-size:11.5px">Social platforms</text>
+  <text class="ts" x="970" y="76" text-anchor="middle">IG · FB · TikTok · X</text>
+
+  <rect class="exb" x="890" y="650" width="160" height="56" rx="14"/>
+  <text class="ts" x="970" y="672" text-anchor="middle" style="font-weight:500; fill:var(--ink); font-size:11.5px">Subscriber inboxes</text>
+  <text class="ts" x="970" y="688" text-anchor="middle">~100 box members</text>
+
+  <!-- ======== hub ======== -->
+  <rect class="hubbox" x="430" y="170" width="180" height="400" rx="10"/>
+  <text class="th" x="520" y="200" text-anchor="middle">SHOPIFY STORE</text>
+  <text class="hs" x="520" y="216" text-anchor="middle">single source of truth</text>
+  <line x1="448" y1="228" x2="592" y2="228" stroke="var(--line)" stroke-width="1"/>
+  <text class="hl" x="448" y="254">PRODUCTS &amp; PREORDERS</text>
+  <text class="hs" x="448" y="268">the monthly catalog</text>
+  <text class="hl" x="448" y="304">APPSTLE SUBSCRIPTIONS</text>
+  <text class="hs" x="448" y="318">billing · skips · cancels</text>
+  <text class="hl" x="448" y="354">ORDERS &amp; CUSTOMERS</text>
+  <text class="hs" x="448" y="368">fulfilment · inventory</text>
+  <text class="hl" x="448" y="404">SHELF METAFIELDS</text>
+  <text class="hs" x="448" y="418">following · favorites · owned</text>
+  <text class="hl" x="448" y="454">ANALYTICS</text>
+  <text class="hs" x="448" y="468">ShopifyQL</text>
+
+  <!-- ======== live nodes ======== -->
+  <rect class="box live" x="40" y="170" width="180" height="64" rx="6"/>
+  <text class="tt" x="54" y="194">Catalog Intake</text>
+  <text class="ts" x="54" y="210">follow-up add-ons · new Vol 1</text>
+  <text class="ts" x="54" y="223">2 skills, monthly</text>
+  <rect class="c-live" x="176" y="178" width="34" height="15" rx="3"/>
+  <text class="chipt c-live-t" x="193" y="189" text-anchor="middle">LIVE</text>
+
+  <rect class="box live" x="225" y="540" width="170" height="52" rx="6"/>
+  <text class="tt" x="239" y="561">Box app</text>
+  <text class="ts" x="239" y="577">this repo · Appstle proxy</text>
+  <rect class="c-live" x="351" y="548" width="34" height="15" rx="3"/>
+  <text class="chipt c-live-t" x="368" y="559" text-anchor="middle">LIVE</text>
+
+  <rect class="box live" x="670" y="410" width="180" height="76" rx="6"/>
+  <text class="tt" x="684" y="434">Content Studio</text>
+  <text class="ts" x="684" y="450">reveal copy → script →</text>
+  <text class="ts" x="684" y="463">VO edit → video render</text>
+  <text class="ts" x="684" y="477">4 skills, per box</text>
+  <rect class="c-live" x="806" y="418" width="34" height="15" rx="3"/>
+  <text class="chipt c-live-t" x="823" y="429" text-anchor="middle">LIVE</text>
+
+  <rect class="box live" x="40" y="770" width="160" height="44" rx="6"/>
+  <text class="tt" x="54" y="789">/morning brief</text>
+  <text class="ts" x="54" y="804">daily digest to Ricky</text>
+  <rect class="c-live" x="156" y="778" width="34" height="15" rx="3"/>
+  <text class="chipt c-live-t" x="173" y="789" text-anchor="middle">LIVE</text>
+
+  <rect class="box shelf" x="430" y="650" width="180" height="56" rx="6"/>
+  <text class="tt" x="444" y="672">Shelf Digest</text>
+  <text class="ts" x="444" y="688">built &amp; tested — needs ESP</text>
+  <rect class="c-shelf" x="536" y="658" width="62" height="15" rx="3"/>
+  <text class="chipt c-shelf-t" x="567" y="669" text-anchor="middle">SHELVED</text>
+
+  <!-- ======== data ======== -->
+  <rect class="box data" x="40" y="360" width="180" height="48" rx="6"/>
+  <text class="tt" x="54" y="381">Manga Masterlist</text>
+  <text class="ts" x="54" y="397">every series we stock</text>
+
+  <!-- ======== planned T1 ======== -->
+  <rect class="box plan plan1" x="225" y="250" width="170" height="64" rx="6"/>
+  <rect class="signoff" x="235" y="259" width="7" height="7" transform="rotate(45 238.5 262.5)"/>
+  <text class="tt" x="252" y="272">Listing QA &amp;</text>
+  <text class="tt" x="252" y="286">Masterlist Sync</text>
+  <text class="ts" x="252" y="302">audits every import</text>
+  <rect class="c-t1" x="359" y="258" width="26" height="15" rx="3"/>
+  <text class="chipt c-t1-t" x="372" y="269" text-anchor="middle">T1</text>
+
+  <rect class="box plan plan1" x="670" y="200" width="180" height="56" rx="6"/>
+  <rect class="signoff" x="680" y="209" width="7" height="7" transform="rotate(45 683.5 212.5)"/>
+  <text class="tt" x="697" y="222">Box Curation</text>
+  <text class="ts" x="697" y="236">ranks picks from follows ·</text>
+  <text class="ts" x="697" y="248">favorites · owned shelves</text>
+  <rect class="c-t1" x="814" y="208" width="26" height="15" rx="3"/>
+  <text class="chipt c-t1-t" x="827" y="219" text-anchor="middle">T1</text>
+
+  <rect class="box plan plan1" x="670" y="650" width="180" height="56" rx="6"/>
+  <text class="tt" x="684" y="672">Email Lifecycle</text>
+  <text class="ts" x="684" y="688">ESP setup · flows · sends</text>
+  <rect class="c-t1" x="814" y="658" width="26" height="15" rx="3"/>
+  <text class="chipt c-t1-t" x="827" y="669" text-anchor="middle">T1</text>
+
+  <!-- ======== planned T2 ======== -->
+  <rect class="box plan" x="225" y="650" width="180" height="64" rx="6"/>
+  <rect class="signoff" x="235" y="659" width="7" height="7" transform="rotate(45 238.5 662.5)"/>
+  <text class="tt" x="252" y="672">Subscription Ops</text>
+  <text class="ts" x="252" y="688">dunning · skips · cancels</text>
+  <text class="ts" x="252" y="701">daily scan</text>
+  <rect class="c-t2" x="369" y="658" width="26" height="15" rx="3"/>
+  <text class="chipt c-t2-t" x="382" y="669" text-anchor="middle">T2</text>
+
+  <rect class="box plan" x="890" y="480" width="160" height="70" rx="6"/>
+  <rect class="signoff" x="900" y="489" width="7" height="7" transform="rotate(45 903.5 492.5)"/>
+  <text class="tt" x="917" y="516">Inventory &amp; Reorder</text>
+  <text class="ts" x="917" y="530">oversell check pre-cutoff</text>
+  <text class="ts" x="917" y="543">drafts distributor orders</text>
+  <rect class="c-t2" x="1014" y="488" width="26" height="15" rx="3"/>
+  <text class="chipt c-t2-t" x="1027" y="499" text-anchor="middle">T2</text>
+
+  <rect class="box plan" x="40" y="650" width="160" height="64" rx="6"/>
+  <rect class="signoff" x="50" y="659" width="7" height="7" transform="rotate(45 53.5 662.5)"/>
+  <text class="tt" x="67" y="672">KPI Rollup</text>
+  <text class="ts" x="67" y="688">MRR · churn · attach rate</text>
+  <text class="ts" x="67" y="701">weekly ShopifyQL</text>
+  <rect class="c-t2" x="164" y="658" width="26" height="15" rx="3"/>
+  <text class="chipt c-t2-t" x="177" y="669" text-anchor="middle">T2</text>
+
+  <!-- ======== planned T3 ======== -->
+  <rect class="box plan" x="890" y="410" width="160" height="56" rx="6"/>
+  <text class="tt" x="904" y="432">Social Publishing</text>
+  <text class="ts" x="904" y="448">queues the reveal window</text>
+  <rect class="c-t3" x="1014" y="418" width="26" height="15" rx="3"/>
+  <text class="chipt c-t3-t" x="1027" y="429" text-anchor="middle">T3</text>
+
+  <rect class="box plan" x="40" y="460" width="180" height="56" rx="6"/>
+  <text class="tt" x="54" y="482">Release-Date Drift</text>
+  <text class="ts" x="54" y="498">weekly calendar diff</text>
+  <rect class="c-t3" x="184" y="468" width="26" height="15" rx="3"/>
+  <text class="chipt c-t3-t" x="197" y="479" text-anchor="middle">T3</text>
+
+  <rect class="box plan" x="40" y="540" width="160" height="48" rx="6"/>
+  <text class="tt" x="54" y="560">Proxy Health</text>
+  <text class="ts" x="54" y="576">pings box-app endpoints</text>
+  <rect class="c-t3" x="164" y="548" width="26" height="15" rx="3"/>
+  <text class="chipt c-t3-t" x="177" y="559" text-anchor="middle">T3</text>
+
+  <rect class="box plan" x="890" y="770" width="160" height="56" rx="6"/>
+  <rect class="signoff" x="900" y="779" width="7" height="7" transform="rotate(45 903.5 782.5)"/>
+  <text class="tt" x="917" y="792">Support Triage</text>
+  <text class="ts" x="917" y="808">needs inbox connector</text>
+  <rect class="c-t3" x="1014" y="778" width="26" height="15" rx="3"/>
+  <text class="chipt c-t3-t" x="1027" y="789" text-anchor="middle">T3</text>
+
+  <!-- ======== Ricky ======== -->
+  <circle class="ricky-outer" cx="760" cy="330" r="40"/>
+  <circle class="ricky-inner" cx="760" cy="330" r="34"/>
+  <text class="th" x="760" y="329" text-anchor="middle" style="font-size:13px">RICKY</text>
+  <text class="ts" x="760" y="344" text-anchor="middle">final call</text>
+</svg>
+<figcaption>Every agent is a spoke off the store; the only human hop sits between
+Box Curation's ranked shortlist and the Content Studio. Thinner interactions —
+slip notices and the reveal-announcement email routing through Email Lifecycle —
+are omitted for legibility; the companion doc lists them.</figcaption>
+</figure>
+
+<div class="legend">
+  <span class="lg"><span class="sw sw-live"></span>live skill</span>
+  <span class="lg"><span class="sw sw-shelf"></span>built, shelved</span>
+  <span class="lg"><span class="sw sw-plan"></span>planned (T1–T3 = build tier)</span>
+  <span class="lg"><span class="sw sw-data"></span>data store</span>
+  <span class="lg"><span class="sw sw-ex"></span>outside world</span>
+  <span class="lg"><span class="sw sw-bus"></span>store-read bus</span>
+  <span class="lg"><span class="dia"></span>output lands on Ricky's desk for sign-off</span>
+</div>
+</div>
+
+<h2>Build order</h2>
+<p class="h2sub">Top to bottom. Tier 1 unlocks finished work and data only Honsama has;
+Tier 2 stops daily revenue leaks; Tier 3 is polish once the machine hums.</p>
+
+<div class="tier t1">
+  <div class="tier-tag"><span class="tier-num">T1</span>
+    <span class="tier-why">Build next — sunk work &amp; unique data</span></div>
+  <div class="chips">
+    <div class="chip cp"><b>Email Lifecycle</b><span>digest pipeline is done; one ESP signup from revenue</span></div>
+    <div class="chip cp"><b>Listing QA &amp; Masterlist Sync</b><span>catalog errors compound monthly — audit every import</span></div>
+    <div class="chip cp"><b>Box Curation</b><span>follows / favorites / shelves → evidence-based picks</span></div>
+  </div>
+</div>
+
+<div class="tier t2">
+  <div class="tier-tag"><span class="tier-num">T2</span>
+    <span class="tier-why">Operations — plug the leaks</span></div>
+  <div class="chips">
+    <div class="chip cp"><b>Subscription Ops &amp; Churn</b><span>failed billings and skip streaks, caught daily</span></div>
+    <div class="chip cp"><b>Inventory &amp; Reorder</b><span>no oversells at the 21st cutoff; reorder drafts</span></div>
+    <div class="chip cp"><b>KPI Rollup</b><span>one trending source of truth, fed into /morning</span></div>
+  </div>
+</div>
+
+<div class="tier t3">
+  <div class="tier-tag"><span class="tier-num">T3</span>
+    <span class="tier-why">Polish — once T1–T2 are humming</span></div>
+  <div class="chips">
+    <div class="chip cp"><b>Social Publishing</b><span>content actually posts itself, 16th–21st</span></div>
+    <div class="chip cp"><b>Release-Date Drift</b><span>preorder dates stay honest</span></div>
+    <div class="chip cp"><b>Support Triage</b><span>drafted replies; waits on inbox connector</span></div>
+    <div class="chip cp"><b>Proxy Health</b><span>the box UI stays up</span></div>
+  </div>
+</div>
+
+<div class="tier t0">
+  <div class="tier-tag"><span class="tier-num">Live</span>
+    <span class="tier-why">Already running today</span></div>
+  <div class="chips">
+    <div class="chip cl"><b>Catalog Intake</b><span>follow-up add-ons + new Vol 1 CSVs</span></div>
+    <div class="chip cl"><b>Content Studio</b><span>reveal → script → VO → video</span></div>
+    <div class="chip cl"><b>Box app</b><span>this repo — Appstle proxy + shelf metafields</span></div>
+    <div class="chip cl"><b>/morning brief</b><span>daily digest</span></div>
+    <div class="chip cs"><b>Shelf Digest</b><span>built &amp; shelved — Email Lifecycle revives it</span></div>
+  </div>
+</div>
+
+<ul class="deps">
+  <li><b>Curation feeds two ways:</b> its picks go to the Content Studio, its demand estimates set Inventory's stocking depth.</li>
+  <li><b>Email Lifecycle unblocks others:</b> Subscription Ops' win-backs and Drift's slip notices need a send channel before their customer-facing half works.</li>
+  <li><b>Two external prerequisites:</b> Support Triage waits on an inbox connector; Social Publishing waits on a scheduling-tool choice.</li>
+</ul>
+
+<footer>kickoff prompts, cadences &amp; full responsibilities: AUTOMATION-AGENTS.md · indigo = live · vermilion = planned · gold ◆ = Ricky signs off</footer>
+</div>
