@@ -369,5 +369,21 @@ scheduling tool choice.
 
 ---
 
+## Sign-off tracking (the visual map)
+
+`AUTOMATION-AGENTS-MAP.html` recolors itself from a `STATUS` block at the top
+of the file — one line per duty, four states: `planned` (dashed vermilion) →
+`building` (solid vermilion) → `gated` (dashed indigo, chip = manual runs
+toward the 3-runs gate, e.g. `note: "2/3"`) → `live` (solid indigo, same as the
+existing skills). The header shows a running tally.
+
+**To sign a duty off:** edit its `STATUS` line, commit, and republish the file
+to the artifact (from any Claude session: "republish
+`shopify-appstle/AUTOMATION-AGENTS-MAP.html` to
+https://claude.ai/code/artifact/c7fbd242-a1b2-4ec2-9dd3-ce3100094c8c"). Sign-off
+means the org gate cleared — three documented founder runs and the charter
+updated — not just "the code exists".
+
 *Last updated: 2026-09-01. When an agent ships, note its skill name next to
-its entry so this doc stays the map of what covers what.*
+its entry and flip its STATUS line so this doc and the map stay the record of
+what covers what.*
