@@ -35,7 +35,7 @@ degrade loudly, never fabricate; every run ends with a report to
 | Duty in this doc | Agent Org owner | Status |
 |---|---|---|
 | KPI Rollup | **01 Analyst** | Covered outright (metrics of record, digests, gate packs) |
-| Email Lifecycle / Shelf Digest | **02 Content** (drafts, email touches) + **03 Ops** (script runs) | Still blocked on ESP; standing one up is founder work — the digest pipeline in this repo is the ready payload |
+| Email Lifecycle / Shelf Digest | **02 Content** (copy) + **03 Ops** (runs the 16th send) | **Resend project** (`HonsamaOps/Honsama Email Automation/resend_digest/`): setup W4, founder-run Oct/Nov/Dec 16, Ops agent from Jan 16 — $0, Klaviyo stays deferred |
 | Social Publishing | **02 Content** drafts; *pressing Post stays founder* per charter | Not an agent yet — a future graduation of Content, behind its own 3-runs gate |
 | Subscription Ops & Churn | **03 Ops** (21st reconciliation) + **01 Analyst** (churn reads — flagger dormant) + **05 Support** (win-back drafts) | Split across three charters; churn flagger is a named dormant upstream |
 | Inventory & Reorder | **03 Ops** | Covered (calculator, iPage prep, 26th sweep; live-inventory gate in its rollout row) |
@@ -65,7 +65,7 @@ following box month).
 | Early month | Scrape publisher calendars, build next month's listings | Catalog Intake (existing skills) |
 | After import | Verify listings landed correctly, sync Masterlist | **Listing QA & Masterlist Sync** (planned) |
 | ~13th–15th | Pick next month's box titles | **Box Curation** (planned) |
-| ~16th | Shelf Digest email to subscribers | **Email Lifecycle** (planned — pipeline built, needs ESP) |
+| ~16th | Shelf Digest email to subscribers | **Email Lifecycle** (Resend lane — setup W4, first send Oct 16) |
 | 16th–21st | Reveal content + videos, add-on window open | Content Production (existing skills) |
 | 21st/22nd | Add-on cutoff, box month closes | **Inventory & Reorder** check before this (planned) |
 | Daily | Orders, billing failures, cancellations, skips | **Subscription Ops** (planned) |
@@ -86,7 +86,7 @@ following box month).
 | `mangavideomaker` | Video renderer (auto path) | Chapters + VO package → 3 finished MP4s with captions and endcard | Posting/scheduling |
 | `morning` | Daily brief | Morning brief artifact | Business KPIs (until KPI agent feeds it) |
 | `shopify-appstle` app (this repo) | Subscriber box UI backend | Box view/add/remove/skip/discount via Appstle; follow/favorite/owned metafield routes | Monitoring itself (Proxy Health agent's job) |
-| `digest/` pipeline (this repo) | Shelf Digest generator | Personalized monthly email JSON + Klaviyo push script + template — **built, shelved: no ESP** | Actually sending — blocked until Email Lifecycle agent stands up an ESP |
+| `digest/` pipeline (this repo) | Shelf Digest generator | Personalized monthly email JSON + sender + template — **built; launching via Resend Oct 16** (Agent Org rule 9) | Copy changes (Content agent); the send itself stays founder-run until the Dec 16 run clears the 3-runs gate |
 
 **Gap summary:** intake, content, and the subscriber UI are automated. Nothing
 yet closes the loop from your own data back into decisions (curation), nothing
@@ -104,7 +104,7 @@ Tier 3 is polish.
 ### Tier 1 — build first (unlocks sunk work + unique data)
 
 1. **Email Lifecycle Agent** — the digest pipeline is finished and tested;
-   it's blocked only on an ESP account. Highest ROI per hour of work.
+   the Resend lane launches it at $0 (project scheduled W4). Highest ROI per hour of work.
 2. **Listing QA & Masterlist Sync Agent** — protects the catalog machine that
    runs every single month; errors here compound (a missed Masterlist entry
    means missed sequels forever after).
@@ -135,27 +135,27 @@ Tier 3 is polish.
 - **Role:** Email marketing operator. Owns everything that lands in a
   subscriber's inbox.
 - **Responsibilities:**
-  - One-time: stand up the ESP (Klaviyo free tier per `digest/README.md`, or
-    evaluate a direct-send alternative), create the Shelf Digest flow, run the
-    self-test send.
+  - One-time (Week 4): Resend on `mail.honsama.com` — DNS, API key, `send-resend.js`,
+    consent filter, signed unsubscribe route; self-test + canary. No paid ESP.
   - Monthly (~16th, after the add-ons run, before the 21st): run
     `digest/generate.js`, sanity-check counts (subscribers ~100, new releases
     ~30–50; 0 releases = add-ons run hasn't happened, wait), dry-run
-    `send-klaviyo.js`, then `--send`.
+    `send-resend.js`, then `--send` (100/day cap → remainder on the 17th).
   - Later: abandoned-cart, post-purchase, and box-reveal announcement flows.
 - **Not responsible for:** writing reveal content (Reveal skill), picking
   digest contents (the pipeline computes them).
 - **Cadence:** monthly send; flows run themselves once live.
-- **Needs:** `ADMIN_API_TOKEN`, `KLAVIYO_PRIVATE_KEY` in `.env`
-  (setup steps in `digest/README.md`), `honsama-app` repo for the
-  engine/series-index files.
+- **Needs:** `ADMIN_API_TOKEN`, `RESEND_API_KEY` in `.env`, verified
+  `mail.honsama.com` in Resend, `honsama-app` repo for the engine/series-index
+  files. Email routing rule: Agent Org README rule 9.
 - **Kickoff prompt:**
-  > Read `digest/README.md` and `honsama-app/DIGEST-EMAIL-BRIEF.md`, then help
-  > me unshelve the Shelf Digest. Walk me through the Klaviyo signup and key
-  > setup, paste-ready flow config, and run a dry-run of the full monthly
-  > pipeline. Once my test send looks right, set up a monthly Routine that
-  > runs generate → dry-run → send on the 16th and reports the counts to me
-  > before sending.
+  > Read `HonsamaOps/Honsama Email Automation/resend_digest/README.md` and
+  > `digest/README.md`. Build the Resend lane: `digest/send-resend.js` (dry run
+  > default, `--send`, `--limit 100`, resumable state file), the SUBSCRIBED
+  > consent filter in `generate.js`, and the signed `/proxy/digest-unsubscribe`
+  > route in `index.js` that flips Shopify consent. Then walk me through the
+  > self-send and 5-person canary. The monthly send stays founder-run until
+  > the Dec 16 run clears the 3-runs gate.
 
 ### 2. Listing QA & Masterlist Sync Agent 🥇
 
@@ -224,7 +224,7 @@ Tier 3 is polish.
   agent), the email templates themselves once Email Lifecycle owns flows.
 - **Cadence:** daily Routine; weekly summary.
 - **Needs:** Shopify MCP (orders/customers), Appstle API (key already used by
-  this repo), later an outbound channel via the ESP.
+  this repo), later an outbound channel via the Resend lane.
 - **Kickoff prompt:**
   > Build a daily subscription-ops skill for Honsama. Using the Shopify MCP
   > and the Appstle API (see how shopify-appstle/index.js authenticates),
@@ -369,5 +369,21 @@ scheduling tool choice.
 
 ---
 
+## Sign-off tracking (the visual map)
+
+`AUTOMATION-AGENTS-MAP.html` recolors itself from a `STATUS` block at the top
+of the file — one line per duty, four states: `planned` (dashed vermilion) →
+`building` (solid vermilion) → `gated` (dashed indigo, chip = manual runs
+toward the 3-runs gate, e.g. `note: "2/3"`) → `live` (solid indigo, same as the
+existing skills). The header shows a running tally.
+
+**To sign a duty off:** edit its `STATUS` line, commit, and republish the file
+to the artifact (from any Claude session: "republish
+`shopify-appstle/AUTOMATION-AGENTS-MAP.html` to
+https://claude.ai/code/artifact/c7fbd242-a1b2-4ec2-9dd3-ce3100094c8c"). Sign-off
+means the org gate cleared — three documented founder runs and the charter
+updated — not just "the code exists".
+
 *Last updated: 2026-09-01. When an agent ships, note its skill name next to
-its entry so this doc stays the map of what covers what.*
+its entry and flip its STATUS line so this doc and the map stay the record of
+what covers what.*
