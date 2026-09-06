@@ -5,29 +5,46 @@ const cors = require("cors");
 const https = require("https");
 
 // ---------------------------------------------------------------------------
-// TRANSPORT DEFAULTS (2026-08-20)
+// TRANSPORT DEFAULTS (2026-08-20, revised 2026-09-05)
 //
-// KEEP-ALIVE. Every axios call here opened a fresh TCP+TLS connection to
-// subscription-admin.appstle.com. Measured handshake cost is 25-55ms (TLS
-// complete at 30-80ms on a cold socket), so a warm instance paid that on every
-// add, remove, details read and follow toggle. One agent, reused for the life
-// of the instance, removes it for every call after the first.
+// KEEP-ALIVE: DELIBERATELY OFF. It was on from 2026-08-20 to save a 25-55ms
+// TLS handshake per call (TLS complete at 30-80ms on a cold socket). That
+// saving is real but small, and it is bought with a race this proxy cannot
+// afford: a pooled socket Appstle has already closed is still handed to the
+// next request, which then fails with ECONNRESET / "socket hang up" before
+// the request is even written. Nothing here catches that — the only retry
+// logic in this file is for Shopify metafield STALE_OBJECT conflicts — so it
+// reaches the customer as a single volume that silently failed to add.
 //
-// Worth being honest about the size: this is tens of milliseconds, not the
-// seconds anyone is chasing. box-details (one Appstle GET) returns in
-// 413-609ms while box-add (one Appstle PUT — same code path, same auth, same
-// call count) takes 3,000-4,813ms. That ~2.5s gap is Appstle-side and nothing
-// in this file reaches it.
+// The trade is lopsided. One handshake costs 30-80ms against an Appstle write
+// measured at 2,500-5,000ms: about 1%. A dropped write costs a volume the
+// customer believes they bought.
 //
-// TIMEOUT. There was none, so a hung upstream pinned the function until the
-// platform killed it, with no useful error. 20s is deliberately generous: the
-// slowest add observed is 4.8s, and cutting a WRITE short is worse than
-// waiting — the contract edit may still land while the client is told it
-// failed. This only fires on a genuinely stuck call, and turns an opaque
-// platform timeout into a clean 502.
+// Two alternatives were rejected:
+//
+//   - Retrying on ECONNRESET. A socket hang up on a PUT is ambiguous — the
+//     contract edit may already have landed — so a blind retry risks adding
+//     the same volume twice. Not worth it to keep a 1% saving.
+//
+//   - Evicting idle sockets via the agent `timeout` option. In Node that
+//     applies to sockets in use as well as free ones, so any value low enough
+//     to beat Appstle's idle close (which we do not know) would also abort
+//     live writes that legitimately take 5s.
+//
+// The agent has to be explicit. Deleting these two lines would NOT restore
+// pre-2026-08-20 behaviour: package.json pins no `engines`, so this runs on
+// whatever Node version Vercel defaults to, and Node 19+ ships
+// https.globalAgent with keepAlive already true. Off must be stated.
+//
+// TIMEOUT (unchanged). There was none, so a hung upstream pinned the function
+// until the platform killed it, with no useful error. 20s is deliberately
+// generous: the slowest add observed is 4.8s, and cutting a WRITE short is
+// worse than waiting — the contract edit may still land while the client is
+// told it failed. This only fires on a genuinely stuck call, and turns an
+// opaque platform timeout into a clean 502.
 // ---------------------------------------------------------------------------
-const keepAliveAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
-axios.defaults.httpsAgent = keepAliveAgent;
+const appstleAgent = new https.Agent({ keepAlive: false, maxSockets: 64 });
+axios.defaults.httpsAgent = appstleAgent;
 axios.defaults.timeout = 20000;
 
 const app = express();
