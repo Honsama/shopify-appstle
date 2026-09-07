@@ -811,8 +811,46 @@ async function addToBoxHandler(req, res) {
 // orders carry only the box line item (no per-manga SKUs), so the bookshelf
 // credits the featured manga from these order months + the store's box_month
 // metaobject entries.
-var BOX_PRODUCT_ID = "8150096773420";
-var BOX_VARIANT_2MANGA_ID = "52361633005868";
+var BOX_PRODUCT_ID = "8150096773420";        // reference only - see boxTier()
+var BOX_VARIANT_2MANGA_ID = "52361633005868"; // reference only - see boxTier()
+
+// WHICH BOX TIER IS THIS ORDER LINE, IF ANY? "2" | "3" | null.
+//
+// THIS USED TO READ li.product.id AND li.variant.id, AND THAT IS WHY /owned HAS
+// ANSWERED {available:false} SINCE 19 JULY 2026. Those two object references
+// need the `read_products` scope, which this app has never requested - its
+// OAuth list is read_orders, read_all_orders, write_orders, read_customers,
+// write_customers. The Admin API answered:
+//
+//   Access denied for product field. Required access: `read_products`
+//   path: customer.orders.nodes[12].lineItems.nodes[0].variant
+//   ... Too many execution errors, max error limit reached. Results truncated
+//
+// Orders themselves read fine; only the joins were denied. #3 later made the
+// route degrade quietly instead of 5xx-ing, which stopped the 675KB-per-view
+// bleed and also stopped anyone noticing for six weeks.
+//
+// SKU, TITLE AND VARIANT TITLE ARE DENORMALISED ONTO THE ORDER LINE and need no
+// extra scope, so the same question is answered without the joins. Verified on
+// real orders 6 Sep 2026: box lines carry sku MMB-3, title "Honsama's Monthly
+// Manga Box", variantTitle "3 Manga"; the product has exactly two variants,
+// MMB-3 "3 Manga" and MMB-2 "2 Manga".
+//
+// SKU FIRST, TITLE AS THE FALLBACK. SKUs on this store are hand-entered and
+// have been malformed before, which is why the title path exists at all - but a
+// line with a broken SKU still carries the product title Shopify copied onto it
+// at purchase. Renaming the product would break the fallback, not the primary.
+var BOX_TITLE = "Honsama's Monthly Manga Box";
+
+function boxTier(li) {
+    var sku = String((li && li.sku) || "").trim().toUpperCase();
+    if (sku === "MMB-2") return "2";
+    if (sku === "MMB-3") return "3";
+    if (String((li && li.title) || "").trim() === BOX_TITLE) {
+        return String((li && li.variantTitle) || "").trim().indexOf("2") === 0 ? "2" : "3";
+    }
+    return null;
+}
 
 // GET owned → { available, skus[], orders, boxMonths[], boxMonths2[] } — the
 // customer's FULL order history.
@@ -843,7 +881,7 @@ async function ownedHandler(req, res) {
                                 pageInfo { hasNextPage endCursor }
                                 nodes {
                                     createdAt
-                                    lineItems(first: 100) { nodes { sku product { id } variant { id } } }
+                                    lineItems(first: 100) { nodes { sku title variantTitle } }
                                 }
                             }
                         }
@@ -866,12 +904,13 @@ async function ownedHandler(req, res) {
                     // stragglers into the 22nd, so the boundary is day <= 22 ->
                     // +1 month; day >= 23 -> +2 (the "box in ~6 weeks" case).
                     // Dates shifted -7h to approximate store time (PDT).
-                    if (li.product?.id?.endsWith(`/${BOX_PRODUCT_ID}`)) {
+                    const tier = boxTier(li);
+                    if (tier) {
                         const d = new Date(new Date(o.createdAt).getTime() - 7 * 3600 * 1000);
                         const delta = d.getUTCDate() <= 22 ? 1 : 2;
                         const midx = d.getUTCMonth() + delta; // 0-based month index, may overflow year
                         const month = `${d.getUTCFullYear() + Math.floor(midx / 12)}-${String((midx % 12) + 1).padStart(2, "0")}`;
-                        if (li.variant?.id?.endsWith(`/${BOX_VARIANT_2MANGA_ID}`)) boxMonths2.add(month);
+                        if (tier === "2") boxMonths2.add(month);
                         else boxMonths.add(month);
                     }
                 });
