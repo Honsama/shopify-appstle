@@ -565,6 +565,45 @@ function collectSkus(node, out) {
     return out;
 }
 
+// Every storefront route answers a failure with 409, never a 5xx.
+//
+// These are reachable ONLY through Shopify's App Proxy, and Shopify REPLACES
+// the body of any 5xx with its own themed storefront error page. A real
+// capture from 6 Sep 2026, taken in the browser:
+//
+//   proxy 500 <!doctype html><html class="js" lang="en"> ... LayoutHub
+//
+// The JSON, and the upstream reason inside it, never reaches the client. Five
+// dropped volumes went undiagnosed because of exactly that, and the client-side
+// logging added to catch them could not work either. #3 hit this first on
+// /owned, #9 fixed it for box-add, #11 for box-remove; this finishes the set.
+//
+// SAFE BY CONSTRUCTION: 409 and 502 are both non-2xx, so every existing client
+// check (`r.ok ? r.json() : null`) behaves exactly as before. The only thing
+// that changes is that the body survives.
+//
+// NOT the 200-with-degraded-payload shape /owned uses. That works there because
+// an empty list is a meaningful answer; for /box it would be actively harmful,
+// because {subscribed:false} is how the bookshelf decides to show a SUBSCRIBE
+// nudge — a read failure would tell a paying subscriber to sign up.
+//
+// The bearer-gated /api/appstle/* routes are NOT touched: they are called
+// directly by ln_reward_sync.py, never through the App Proxy, so nothing masks
+// their 5xx and a 5xx is the honest answer there.
+function upstreamFailure(res, label, error, message) {
+    const upstream = error && error.response && error.response.data;
+    console.error(
+        `proxy/${label} error:`,
+        (error && error.response && error.response.status) || "",
+        typeof upstream === "object" ? JSON.stringify(upstream) : (upstream || (error && error.message))
+    );
+    return res.status(409).json({
+        ok: false,
+        error: message,
+        details: upstream || (error && error.message),
+    });
+}
+
 // GET box → { subscribed, contractId?, status?, skus[] }
 // Hydrates the bookshelf's amber "in your next box" chips.
 async function boxHandler(req, res) {
@@ -589,8 +628,7 @@ async function boxHandler(req, res) {
         const skus = Array.from(new Set(collectSkus(rows)));
         res.status(200).json({ subscribed: true, contractId: contract.id, status: contract.status, skus });
     } catch (error) {
-        console.error("proxy/box error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Failed to read box." });
+        return upstreamFailure(res, "box", error, "Failed to read box.");
     }
 }
 
@@ -1018,8 +1056,12 @@ function seriesListToggleHandler(add, mf, verb) {
             }
             res.status(409).json({ error: `${verb} is busy, please try again.` });
         } catch (error) {
-            console.error(`proxy/${add ? "" : "un"}${verb.toLowerCase()} error:`, error.response?.data || error.message);
-            res.status(502).json({ error: `Failed to ${add ? "" : "un"}${verb.toLowerCase()}.` });
+            return upstreamFailure(
+                res,
+                `${add ? "" : "un"}${verb.toLowerCase()}`,
+                error,
+                `Failed to ${add ? "" : "un"}${verb.toLowerCase()}.`
+            );
         }
     };
 }
@@ -1057,8 +1099,7 @@ async function boxDetailsHandler(req, res) {
         });
         res.status(200).json({ subscribed: true, contractId: contract.id, details: rows });
     } catch (error) {
-        console.error("proxy/box-details error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Failed to read box details." });
+        return upstreamFailure(res, "box-details", error, "Failed to read box details.");
     }
 }
 
@@ -1108,8 +1149,7 @@ async function boxSkipHandler(req, res) {
         });
         res.status(200).json({ ok: true, data: response.data });
     } catch (error) {
-        console.error("proxy/box-skip error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Failed to skip order.", details: error.response?.data || error.message });
+        return upstreamFailure(res, "box-skip", error, "Failed to skip order.");
     }
 }
 
@@ -1126,8 +1166,7 @@ async function boxDiscountHandler(req, res) {
         });
         res.status(200).json({ ok: true, data: response.data });
     } catch (error) {
-        console.error("proxy/box-discount error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Failed to apply discount.", details: error.response?.data || error.message });
+        return upstreamFailure(res, "box-discount", error, "Failed to apply discount.");
     }
 }
 
