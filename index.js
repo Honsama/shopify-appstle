@@ -596,6 +596,38 @@ async function boxHandler(req, res) {
 
 // POST add  { variantId, quantity? } → adds a ONE-TIME item to the logged-in
 // customer's own next box. isOneTimeProduct is hardcoded true.
+// Shopify rejects a subscription-draft commit that collided with another edit
+// on the same contract: STALE_CONTRACT, "Another operation updated the contract
+// concurrently as the commit was in progress." Appstle surfaces Shopify's own
+// constraint errors as 422 with the reason in the body.
+//
+// Catch Up on My Library fires up to NINE adds at ONE contract a few hundred ms
+// apart, which is precisely that collision, and the symptom matches: one volume
+// out of nine fails while its neighbours succeed, at a different position every
+// run (Vol 4, then Vol 2, then Vol 3).
+//
+// THIS IS THE ONLY ADD FAILURE THAT IS SAFE TO RETRY, and that is the whole
+// reason the retry is this narrow. STALE_CONTRACT means the commit was
+// REJECTED, so the line item did NOT land and re-sending cannot add it twice.
+// Every other failure is ambiguous — the write may have applied and only the
+// response been lost — and a blind retry there would double-charge a customer.
+// Those still fail through to the client untouched.
+//
+// Matched on the RESPONSE BODY only, never on error.message: a client-side
+// axios timeout is exactly the ambiguous case this must not touch.
+const ADD_ATTEMPTS = 3;
+
+function isSafeToResendAdd(error) {
+    // 429 is rejected before processing, so re-sending cannot double-add.
+    if (error && error.response && error.response.status === 429) return true;
+    const data = error && error.response && error.response.data;
+    let body = typeof data === "string" ? data : "";
+    if (data && typeof data === "object") {
+        try { body = JSON.stringify(data); } catch (e) { body = ""; }
+    }
+    return /STALE_CONTRACT|concurrently as the commit was in progress/i.test(body);
+}
+
 async function addToBoxHandler(req, res) {
     const rawVariant = String((req.body || {}).variantId || "");
     const variantId = rawVariant.replace(/^gid:\/\/shopify\/ProductVariant\//, "");
@@ -612,14 +644,37 @@ async function addToBoxHandler(req, res) {
         if (!contract) return res.status(403).json({ error: "No active subscription." });
 
         const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-add-line-item?contractId=${contract.id}&quantity=${quantity}&variantId=${variantId}&isOneTimeProduct=true`;
-        const response = await axios.put(url, {}, {
-            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
-        });
+        const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
 
-        res.status(200).json({ ok: true, contractId: contract.id, data: response.data });
+        let lastError = null;
+        for (let attempt = 1; attempt <= ADD_ATTEMPTS; attempt++) {
+            try {
+                const response = await axios.put(url, {}, { headers });
+                if (attempt > 1) {
+                    console.warn(`proxy/add-line-item: variant ${variantId} succeeded on attempt ${attempt}.`);
+                }
+                return res.status(200).json({ ok: true, contractId: contract.id, data: response.data });
+            } catch (error) {
+                lastError = error;
+                if (attempt === ADD_ATTEMPTS || !isSafeToResendAdd(error)) break;
+                // Back off enough for the in-flight commit to settle. An Appstle
+                // write measures 2.5-5s, so these are deliberately not 80ms.
+                console.warn(`proxy/add-line-item: contract busy, retry ${attempt}/${ADD_ATTEMPTS - 1} (variant ${variantId}).`);
+                await new Promise((r) => setTimeout(r, 900 * attempt));
+            }
+        }
+        throw lastError;
     } catch (error) {
-        console.error("proxy/add-line-item error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Failed to add to box.", details: error.response?.data || error.message });
+        // Log the WHOLE upstream body. This is the only place the real reason
+        // exists — the client only ever sees a flat 502 — and three dropped
+        // volumes in a row were undiagnosable because nobody could read it.
+        const upstream = error.response?.data;
+        console.error(
+            "proxy/add-line-item error:",
+            error.response?.status || "",
+            typeof upstream === "object" ? JSON.stringify(upstream) : (upstream || error.message)
+        );
+        res.status(502).json({ error: "Failed to add to box.", details: upstream || error.message });
     }
 }
 
