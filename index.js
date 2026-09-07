@@ -692,7 +692,27 @@ async function addToBoxHandler(req, res) {
             `${Date.now() - (req._addStartedAt || Date.now())}ms`,
             typeof upstream === "object" ? JSON.stringify(upstream) : (upstream || error.message)
         );
-        res.status(502).json({ error: "Failed to add to box.", details: upstream || error.message });
+        // 409, NOT 502, AND THE STATUS IS THE WHOLE POINT.
+        //
+        // /box-add is only reachable through Shopify's App Proxy, and Shopify
+        // REPLACES the body of any 5xx with its own themed storefront error
+        // page. Captured from a real failed run on 6 Sep 2026, the browser got:
+        //
+        //   proxy 500 <!doctype html><html class="js" lang="en"> ... LayoutHub
+        //
+        // -- our JSON, and `details` with it, was gone. That is the same trap
+        // #3 fixed for /owned. Five dropped volumes were undiagnosable because
+        // of it: the client was logging a status Shopify had rewritten and a
+        // body Shopify had thrown away.
+        //
+        // A 4xx passes through the App Proxy UNTOUCHED — verified against this
+        // same route family, where /box-details' 401 arrives intact. So the
+        // reason now reaches the client, which already logs the body.
+        //
+        // 409 rather than 200: the client treats any non-2xx as a failed
+        // volume, which is correct and must not change. Returning 200 the way
+        // /owned does would silently mark failed volumes as added.
+        res.status(409).json({ ok: false, error: "Failed to add to box.", details: upstream || error.message });
     }
 }
 
