@@ -840,13 +840,20 @@ var BOX_VARIANT_2MANGA_ID = "52361633005868"; // reference only - see boxTier()
 // have been malformed before, which is why the title path exists at all - but a
 // line with a broken SKU still carries the product title Shopify copied onto it
 // at purchase. Renaming the product would break the fallback, not the primary.
-var BOX_TITLE = "Honsama's Monthly Manga Box";
+// MATCHED AS A SUBSTRING, NOT AN EQUALITY, BECAUSE THE PRODUCT WAS RENAMED.
+// The oldest orders on this store carry "Honsama's NEWLY RELEASED Monthly Manga
+// Box" (e.g. #honsama1001, May 2024) and their line items have LOST THEIR SKU -
+// sku is "" and variantTitle is null. An exact-title test dropped that box
+// entirely: measured on a 28-order subscriber, exact matched 27/28 while the
+// substring matched 28/28. Shopify snapshots the title onto the line at
+// purchase, so a future rename creates the same silent hole - keep this loose.
+var BOX_TITLE_FRAGMENT = "monthly manga box";
 
 function boxTier(li) {
     var sku = String((li && li.sku) || "").trim().toUpperCase();
     if (sku === "MMB-2") return "2";
     if (sku === "MMB-3") return "3";
-    if (String((li && li.title) || "").trim() !== BOX_TITLE) return null;
+    if (String((li && li.title) || "").toLowerCase().indexOf(BOX_TITLE_FRAGMENT) === -1) return null;
     // Same fallback ORDER the Liquid uses, because line items lose different
     // identifiers over time: sku, then the variant, then PRICE. `variant_id`
     // is not reachable without read_products, so variantTitle stands in for it.
