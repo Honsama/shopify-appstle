@@ -629,15 +629,34 @@ const ADD_ATTEMPTS = 2;
 const ADD_RETRY_CUTOFF_MS = 3500;   // no retry once this much is already gone
 const ADD_RETRY_BACKOFF_MS = 700;
 
-function isSafeToResendAdd(error) {
-    // 429 is rejected before processing, so re-sending cannot double-add.
+// CAPTURED FROM A REAL FAILURE, 6 Sep 2026, in the Vercel log for box-remove:
+//
+//   { entityName: 'subscriptionContractDetails',
+//     errorKey: '10001',
+//     status: 400,
+//     message: 'UserGeneratedError:An unexpected error occurred:
+//               The subscription contract has changed.' }
+//
+// That is the concurrent-edit conflict. Appstle NEVER says "STALE_CONTRACT" —
+// it says "The subscription contract has changed", and it answers 400, not the
+// 422 its docs imply for Shopify constraint errors. The first version of this
+// predicate matched Shopify's vocabulary instead of Appstle's, so it never
+// fired once: the failed add on 6 Sep ran 2,342ms, well inside the retry
+// cutoff, and went straight to the client.
+//
+// Shopify's own names are kept as a second string only in case Appstle ever
+// passes the underlying error through verbatim.
+function isRetryableContractEdit(error) {
+    // 429 is rejected before processing, so re-sending cannot double-apply.
     if (error && error.response && error.response.status === 429) return true;
     const data = error && error.response && error.response.data;
     let body = typeof data === "string" ? data : "";
     if (data && typeof data === "object") {
         try { body = JSON.stringify(data); } catch (e) { body = ""; }
     }
-    return /STALE_CONTRACT|concurrently as the commit was in progress/i.test(body);
+    return /subscription contract has changed/i.test(body)
+        || /"errorKey"\s*:\s*"10001"/i.test(body)
+        || /STALE_CONTRACT|concurrently as the commit was in progress/i.test(body);
 }
 
 async function addToBoxHandler(req, res) {
@@ -684,7 +703,7 @@ async function addToBoxHandler(req, res) {
             } catch (error) {
                 lastError = error;
                 const elapsed = Date.now() - startedAt;
-                if (attempt === ADD_ATTEMPTS || !isSafeToResendAdd(error)) break;
+                if (attempt === ADD_ATTEMPTS || !isRetryableContractEdit(error)) break;
                 if (elapsed > ADD_RETRY_CUTOFF_MS) {
                     console.warn(`proxy/add-line-item: contract busy but ${elapsed}ms already spent, not retrying (variant ${variantId}).`);
                     break;
@@ -1036,13 +1055,48 @@ async function boxRemoveHandler(req, res) {
         const contract = await getContractForCustomer(req.customerId);
         if (!contract) return res.status(403).json({ error: "No active subscription." });
         const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item?contractId=${contract.id}&lineId=${encodeURIComponent(lineId)}&removeDiscount=${removeDiscount}`;
-        const response = await axios.put(url, {}, {
-            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
-        });
-        res.status(200).json({ ok: true, data: response.data });
+        const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
+
+        // Remove hits the same contract-edit conflict as add, and it was a
+        // REMOVE that finally produced the error above: two of them failed
+        // back to back at 20:08:37 and 20:08:38 while clearing eight test
+        // volumes. Removing in bulk is the same collision as adding in bulk.
+        //
+        // Safe to resend for the same reason: "the contract has changed" means
+        // the edit was rejected, so the line is still there. Removing a line
+        // that is already gone is harmless anyway — unlike a double ADD, this
+        // direction cannot cost the customer money.
+        const startedAt = Date.now();
+        let lastError = null;
+        for (let attempt = 1; attempt <= ADD_ATTEMPTS; attempt++) {
+            try {
+                const response = await axios.put(url, {}, { headers });
+                return res.status(200).json({
+                    ok: true,
+                    attempts: attempt,
+                    ms: Date.now() - startedAt,
+                    data: response.data,
+                });
+            } catch (error) {
+                lastError = error;
+                const elapsed = Date.now() - startedAt;
+                if (attempt === ADD_ATTEMPTS || !isRetryableContractEdit(error)) break;
+                if (elapsed > ADD_RETRY_CUTOFF_MS) break;
+                console.warn(`proxy/box-remove: contract busy at ${elapsed}ms, retrying once (line ${lineId}).`);
+                await new Promise((r) => setTimeout(r, ADD_RETRY_BACKOFF_MS));
+            }
+        }
+        throw lastError;
     } catch (error) {
-        console.error("proxy/box-remove error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Failed to remove item.", details: error.response?.data || error.message });
+        const upstream = error.response?.data;
+        console.error(
+            "proxy/box-remove error:",
+            error.response?.status || "",
+            typeof upstream === "object" ? JSON.stringify(upstream) : (upstream || error.message)
+        );
+        // 409 not 502 — see the note on the add path. A 5xx here is replaced
+        // by Shopify's themed error page and the reason never arrives.
+        res.status(409).json({ ok: false, error: "Failed to remove item.", details: upstream || error.message });
     }
 }
 
