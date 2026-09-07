@@ -615,7 +615,19 @@ async function boxHandler(req, res) {
 //
 // Matched on the RESPONSE BODY only, never on error.message: a client-side
 // axios timeout is exactly the ambiguous case this must not touch.
-const ADD_ATTEMPTS = 3;
+// A box-add runs INSIDE a Shopify App Proxy request, so the whole handler
+// shares one upstream budget with whatever Shopify allows. Retrying is only
+// worth anything if the retry still lands inside it: as first written this
+// could reach three 5s PUTs plus 2.7s of backoff, ~17s, which would turn a
+// recoverable failure into a guaranteed one AND leave the customer told it
+// failed while the write was still going.
+//
+// So: ONE retry, and only when the first attempt failed early enough that a
+// second fits. A slow failure is not retried at all — by then the budget is
+// spent, and re-sending would only miss twice.
+const ADD_ATTEMPTS = 2;
+const ADD_RETRY_CUTOFF_MS = 3500;   // no retry once this much is already gone
+const ADD_RETRY_BACKOFF_MS = 700;
 
 function isSafeToResendAdd(error) {
     // 429 is rejected before processing, so re-sending cannot double-add.
@@ -629,6 +641,7 @@ function isSafeToResendAdd(error) {
 }
 
 async function addToBoxHandler(req, res) {
+    req._addStartedAt = Date.now();
     const rawVariant = String((req.body || {}).variantId || "");
     const variantId = rawVariant.replace(/^gid:\/\/shopify\/ProductVariant\//, "");
     if (!/^\d+$/.test(variantId)) {
@@ -646,6 +659,7 @@ async function addToBoxHandler(req, res) {
         const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-add-line-item?contractId=${contract.id}&quantity=${quantity}&variantId=${variantId}&isOneTimeProduct=true`;
         const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
 
+        const startedAt = Date.now();
         let lastError = null;
         for (let attempt = 1; attempt <= ADD_ATTEMPTS; attempt++) {
             try {
@@ -656,11 +670,14 @@ async function addToBoxHandler(req, res) {
                 return res.status(200).json({ ok: true, contractId: contract.id, data: response.data });
             } catch (error) {
                 lastError = error;
+                const elapsed = Date.now() - startedAt;
                 if (attempt === ADD_ATTEMPTS || !isSafeToResendAdd(error)) break;
-                // Back off enough for the in-flight commit to settle. An Appstle
-                // write measures 2.5-5s, so these are deliberately not 80ms.
-                console.warn(`proxy/add-line-item: contract busy, retry ${attempt}/${ADD_ATTEMPTS - 1} (variant ${variantId}).`);
-                await new Promise((r) => setTimeout(r, 900 * attempt));
+                if (elapsed > ADD_RETRY_CUTOFF_MS) {
+                    console.warn(`proxy/add-line-item: contract busy but ${elapsed}ms already spent, not retrying (variant ${variantId}).`);
+                    break;
+                }
+                console.warn(`proxy/add-line-item: contract busy at ${elapsed}ms, retrying once (variant ${variantId}).`);
+                await new Promise((r) => setTimeout(r, ADD_RETRY_BACKOFF_MS));
             }
         }
         throw lastError;
@@ -672,6 +689,7 @@ async function addToBoxHandler(req, res) {
         console.error(
             "proxy/add-line-item error:",
             error.response?.status || "",
+            `${Date.now() - (req._addStartedAt || Date.now())}ms`,
             typeof upstream === "object" ? JSON.stringify(upstream) : (upstream || error.message)
         );
         res.status(502).json({ error: "Failed to add to box.", details: upstream || error.message });
