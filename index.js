@@ -615,48 +615,86 @@ async function boxHandler(req, res) {
 //
 // Matched on the RESPONSE BODY only, never on error.message: a client-side
 // axios timeout is exactly the ambiguous case this must not touch.
-// A box-add runs INSIDE a Shopify App Proxy request, so the whole handler
-// shares one upstream budget with whatever Shopify allows. Retrying is only
-// worth anything if the retry still lands inside it: as first written this
-// could reach three 5s PUTs plus 2.7s of backoff, ~17s, which would turn a
-// recoverable failure into a guaranteed one AND leave the customer told it
-// failed while the write was still going.
+// A contract write runs INSIDE a Shopify App Proxy request, so the whole
+// handler shares one upstream budget. Retrying is only worth anything if the
+// retry still lands inside it, hence RETRY_BUDGET_MS: a wait is only taken if
+// there is room for it. Nothing here retries a slow failure into a timeout.
 //
-// So: ONE retry, and only when the first attempt failed early enough that a
-// second fits. A slow failure is not retried at all — by then the budget is
-// spent, and re-sending would only miss twice.
-const ADD_ATTEMPTS = 2;
-const ADD_RETRY_CUTOFF_MS = 3500;   // no retry once this much is already gone
-const ADD_RETRY_BACKOFF_MS = 700;
+// TWO FAILURES ARE WORTH RESENDING, AND THEY NEED DIFFERENT PATIENCE.
+//
+// 1. CONFLICT (2026-09-06). Captured from a real box-remove:
+//
+//      { entityName: 'subscriptionContractDetails', errorKey: '10001',
+//        status: 400,
+//        message: 'UserGeneratedError:An unexpected error occurred:
+//                  The subscription contract has changed.' }
+//
+//    Appstle NEVER says "STALE_CONTRACT" — it says "the subscription contract
+//    has changed", and answers 400, not the 422 its docs imply. An earlier
+//    predicate matched Shopify's vocabulary instead and never fired once.
+//    This arrives AFTER a full write attempt (~2.5-5s), so one patient retry
+//    is all that fits.
+//
+// 2. RATE LIMIT (2026-09-06). Clearing 24 add-ons produced 16 of these:
+//
+//      429 {"error":"Rate limit exceeded. Try again later."}
+//      429 {"error":"Too many concurrent mutation requests.
+//                    Please wait for existing requests to complete."}
+//
+//    These come back in ~80ms, so they are cheap to sit out — but a single
+//    700ms wait loses to a rate limiter, which is exactly what happened. They
+//    get three tries with a widening wait instead.
+//
+// BOTH ARE SAFE TO RESEND, and that is why the classifier is this narrow. A
+// conflict means the commit was REJECTED and a 429 means the request was never
+// processed, so in neither case did the write land. Every other failure is
+// ambiguous — it may have applied with only the response lost — and a blind
+// retry there would double-charge. Those fail through untouched.
+//
+// Classified on the RESPONSE only, never on error.message: a client-side axios
+// timeout is precisely the ambiguous case this must not touch.
+const RETRY_BUDGET_MS = 6000;
+const CONFLICT_WAITS_MS = [700];              // one patient retry
+const RATE_LIMIT_WAITS_MS = [300, 900, 2700]; // three impatient ones
 
-// CAPTURED FROM A REAL FAILURE, 6 Sep 2026, in the Vercel log for box-remove:
-//
-//   { entityName: 'subscriptionContractDetails',
-//     errorKey: '10001',
-//     status: 400,
-//     message: 'UserGeneratedError:An unexpected error occurred:
-//               The subscription contract has changed.' }
-//
-// That is the concurrent-edit conflict. Appstle NEVER says "STALE_CONTRACT" —
-// it says "The subscription contract has changed", and it answers 400, not the
-// 422 its docs imply for Shopify constraint errors. The first version of this
-// predicate matched Shopify's vocabulary instead of Appstle's, so it never
-// fired once: the failed add on 6 Sep ran 2,342ms, well inside the retry
-// cutoff, and went straight to the client.
-//
-// Shopify's own names are kept as a second string only in case Appstle ever
-// passes the underlying error through verbatim.
-function isRetryableContractEdit(error) {
-    // 429 is rejected before processing, so re-sending cannot double-apply.
-    if (error && error.response && error.response.status === 429) return true;
+function classifyRetryable(error) {
+    if (error && error.response && error.response.status === 429) return "rate limit";
     const data = error && error.response && error.response.data;
     let body = typeof data === "string" ? data : "";
     if (data && typeof data === "object") {
         try { body = JSON.stringify(data); } catch (e) { body = ""; }
     }
-    return /subscription contract has changed/i.test(body)
+    if (/subscription contract has changed/i.test(body)
         || /"errorKey"\s*:\s*"10001"/i.test(body)
-        || /STALE_CONTRACT|concurrently as the commit was in progress/i.test(body);
+        || /STALE_CONTRACT|concurrently as the commit was in progress/i.test(body)) {
+        return "conflict";
+    }
+    return null;
+}
+
+// One Appstle contract write, resent only on the two failures above.
+// Returns { response, attempts, ms }; throws the last error if it runs out.
+async function contractPut(url, headers, label) {
+    const startedAt = Date.now();
+    let lastError = null;
+    for (let attempt = 1; ; attempt++) {
+        try {
+            const response = await axios.put(url, {}, { headers });
+            if (attempt > 1) console.warn(`${label}: recovered on attempt ${attempt}.`);
+            return { response, attempts: attempt, ms: Date.now() - startedAt };
+        } catch (error) {
+            lastError = error;
+            const kind = classifyRetryable(error);
+            if (!kind) break;
+            const waits = kind === "rate limit" ? RATE_LIMIT_WAITS_MS : CONFLICT_WAITS_MS;
+            const wait = waits[attempt - 1];
+            const elapsed = Date.now() - startedAt;
+            if (wait === undefined || elapsed + wait > RETRY_BUDGET_MS) break;
+            console.warn(`${label}: ${kind} at ${elapsed}ms, retry ${attempt} in ${wait}ms.`);
+            await new Promise((r) => setTimeout(r, wait));
+        }
+    }
+    throw lastError;
 }
 
 async function addToBoxHandler(req, res) {
@@ -678,41 +716,19 @@ async function addToBoxHandler(req, res) {
         const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-add-line-item?contractId=${contract.id}&quantity=${quantity}&variantId=${variantId}&isOneTimeProduct=true`;
         const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
 
-        const startedAt = Date.now();
-        let lastError = null;
-        for (let attempt = 1; attempt <= ADD_ATTEMPTS; attempt++) {
-            try {
-                const response = await axios.put(url, {}, { headers });
-                if (attempt > 1) {
-                    console.warn(`proxy/add-line-item: variant ${variantId} succeeded on attempt ${attempt}.`);
-                }
-                // `attempts` and `ms` are diagnostics, not decoration. The retry
-                // is invisible from outside otherwise: a recovered add looks
-                // exactly like a slow one, and the only place that recorded the
-                // difference was a Vercel log nobody could reach. A real run on
-                // 6 Sep had one add at 11,281ms against 3,270-3,757ms for the
-                // other seven, and there was no way to tell whether the retry
-                // had fired or Appstle was simply slow that once.
-                return res.status(200).json({
-                    ok: true,
-                    contractId: contract.id,
-                    attempts: attempt,
-                    ms: Date.now() - startedAt,
-                    data: response.data,
-                });
-            } catch (error) {
-                lastError = error;
-                const elapsed = Date.now() - startedAt;
-                if (attempt === ADD_ATTEMPTS || !isRetryableContractEdit(error)) break;
-                if (elapsed > ADD_RETRY_CUTOFF_MS) {
-                    console.warn(`proxy/add-line-item: contract busy but ${elapsed}ms already spent, not retrying (variant ${variantId}).`);
-                    break;
-                }
-                console.warn(`proxy/add-line-item: contract busy at ${elapsed}ms, retrying once (variant ${variantId}).`);
-                await new Promise((r) => setTimeout(r, ADD_RETRY_BACKOFF_MS));
-            }
-        }
-        throw lastError;
+        // `attempts` and `ms` are diagnostics, not decoration. A recovered
+        // write is otherwise indistinguishable from a slow one, and the only
+        // place that recorded the difference was a Vercel log nobody could
+        // reach. `attempts: 2` on a real run is what finally proved the retry
+        // fires and that it does not double-add.
+        const { response, attempts, ms } = await contractPut(url, headers, `proxy/add-line-item variant ${variantId}`);
+        return res.status(200).json({
+            ok: true,
+            contractId: contract.id,
+            attempts,
+            ms,
+            data: response.data,
+        });
     } catch (error) {
         // Log the WHOLE upstream body. This is the only place the real reason
         // exists — the client only ever sees a flat 502 — and three dropped
@@ -1066,27 +1082,8 @@ async function boxRemoveHandler(req, res) {
         // the edit was rejected, so the line is still there. Removing a line
         // that is already gone is harmless anyway — unlike a double ADD, this
         // direction cannot cost the customer money.
-        const startedAt = Date.now();
-        let lastError = null;
-        for (let attempt = 1; attempt <= ADD_ATTEMPTS; attempt++) {
-            try {
-                const response = await axios.put(url, {}, { headers });
-                return res.status(200).json({
-                    ok: true,
-                    attempts: attempt,
-                    ms: Date.now() - startedAt,
-                    data: response.data,
-                });
-            } catch (error) {
-                lastError = error;
-                const elapsed = Date.now() - startedAt;
-                if (attempt === ADD_ATTEMPTS || !isRetryableContractEdit(error)) break;
-                if (elapsed > ADD_RETRY_CUTOFF_MS) break;
-                console.warn(`proxy/box-remove: contract busy at ${elapsed}ms, retrying once (line ${lineId}).`);
-                await new Promise((r) => setTimeout(r, ADD_RETRY_BACKOFF_MS));
-            }
-        }
-        throw lastError;
+        const { response, attempts, ms } = await contractPut(url, headers, `proxy/box-remove line ${lineId}`);
+        return res.status(200).json({ ok: true, attempts, ms, data: response.data });
     } catch (error) {
         const upstream = error.response?.data;
         console.error(
