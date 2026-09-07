@@ -811,8 +811,83 @@ async function addToBoxHandler(req, res) {
 // orders carry only the box line item (no per-manga SKUs), so the bookshelf
 // credits the featured manga from these order months + the store's box_month
 // metaobject entries.
-var BOX_PRODUCT_ID = "8150096773420";
-var BOX_VARIANT_2MANGA_ID = "52361633005868";
+var BOX_PRODUCT_ID = "8150096773420";        // reference only - see boxTier()
+var BOX_VARIANT_2MANGA_ID = "52361633005868"; // reference only - see boxTier()
+
+// WHICH BOX TIER IS THIS ORDER LINE, IF ANY? "2" | "3" | null.
+//
+// THIS USED TO READ li.product.id AND li.variant.id, AND THAT IS WHY /owned HAS
+// ANSWERED {available:false} SINCE 19 JULY 2026. Those two object references
+// need the `read_products` scope, which this app has never requested - its
+// OAuth list is read_orders, read_all_orders, write_orders, read_customers,
+// write_customers. The Admin API answered:
+//
+//   Access denied for product field. Required access: `read_products`
+//   path: customer.orders.nodes[12].lineItems.nodes[0].variant
+//   ... Too many execution errors, max error limit reached. Results truncated
+//
+// Orders themselves read fine; only the joins were denied. #3 later made the
+// route degrade quietly instead of 5xx-ing, which stopped the 675KB-per-view
+// bleed and also stopped anyone noticing for six weeks.
+//
+// SKU, TITLE AND VARIANT TITLE ARE DENORMALISED ONTO THE ORDER LINE and need no
+// extra scope, so the same question is answered without the joins. Verified on
+// real orders 6 Sep 2026: box lines carry sku MMB-3, title "Honsama's Monthly
+// Manga Box", variantTitle "3 Manga"; the product has exactly two variants,
+// MMB-3 "3 Manga" and MMB-2 "2 Manga".
+//
+// SKU FIRST, TITLE AS THE FALLBACK. SKUs on this store are hand-entered and
+// have been malformed before, which is why the title path exists at all - but a
+// line with a broken SKU still carries the product title Shopify copied onto it
+// at purchase. Renaming the product would break the fallback, not the primary.
+var BOX_TITLE = "Honsama's Monthly Manga Box";
+
+function boxTier(li) {
+    var sku = String((li && li.sku) || "").trim().toUpperCase();
+    if (sku === "MMB-2") return "2";
+    if (sku === "MMB-3") return "3";
+    if (String((li && li.title) || "").trim() !== BOX_TITLE) return null;
+    // Same fallback ORDER the Liquid uses, because line items lose different
+    // identifiers over time: sku, then the variant, then PRICE. `variant_id`
+    // is not reachable without read_products, so variantTitle stands in for it.
+    var vt = String((li && li.variantTitle) || "").trim();
+    if (vt.indexOf("2") === 0) return "2";
+    if (vt.indexOf("3") === 0) return "3";
+    // PRICE LAST, and only on a positive amount. MMB-3 has always billed 34.99
+    // or 36.99 and MMB-2 26.99, with nothing between. A $0.00 box line is real
+    // in this store's history (comped rebills) and must NOT read as 2-manga.
+    var amt = parseFloat(li && li.originalUnitPriceSet && li.originalUnitPriceSet.shopMoney
+        && li.originalUnitPriceSet.shopMoney.amount);
+    if (isFinite(amt) && amt > 0) return amt < 34 ? "2" : "3";
+    return "3";
+}
+
+// SHIP MONTH FROM THE FULFILMENT DATE, in SHOP time.
+//
+// Boxes ship in ONE BATCH per month landing between roughly the 25th and the
+// 2nd, so a fulfilment on day >= 15 belongs to NEXT month's box; below that, to
+// this month's. Verified 15/15 across two customers, Jan 2025 - Jun 2026, when
+// the Liquid was rewritten on 29 Aug 2026.
+//
+// SHOP TIME MATTERS: #HONSAMA3768 fulfilled at 2026-04-01T04:00:22Z, which is
+// 2026-03-31 21:00 in Los Angeles. The Liquid reads a shop-local timestamp, so
+// this has to as well or the two drift for any late-evening fulfilment.
+var SHOP_TZ = "America/Los_Angeles";
+
+function shipMonthFromFulfilment(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    var parts = {};
+    new Intl.DateTimeFormat("en-CA", {
+        timeZone: SHOP_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(d).forEach(function (p) { parts[p.type] = p.value; });
+    var y = parseInt(parts.year, 10);
+    var m = parseInt(parts.month, 10);
+    var day = parseInt(parts.day, 10);
+    if (!y || !m || !day) return null;
+    var midx = (m - 1) + (day >= 15 ? 1 : 0);
+    return `${y + Math.floor(midx / 12)}-${String((midx % 12) + 1).padStart(2, "0")}`;
+}
 
 // GET owned → { available, skus[], orders, boxMonths[], boxMonths2[] } — the
 // customer's FULL order history.
@@ -843,7 +918,14 @@ async function ownedHandler(req, res) {
                                 pageInfo { hasNextPage endCursor }
                                 nodes {
                                     createdAt
-                                    lineItems(first: 100) { nodes { sku product { id } variant { id } } }
+                                    displayFulfillmentStatus
+                                    fulfillments(first: 1) { createdAt }
+                                    lineItems(first: 100) {
+                                        nodes {
+                                            sku title variantTitle
+                                            originalUnitPriceSet { shopMoney { amount } }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -857,23 +939,23 @@ async function ownedHandler(req, res) {
             if (!orders) break; // unknown customer id → empty history
             orders.nodes.forEach((o) => {
                 orderCount++;
+                // ONLY A FULFILLED ORDER CREDITS A BOX MONTH, and the month comes
+                // from the FULFILMENT date. This is not a detail: it is the rule
+                // sections/honsama-my-library.liquid uses, and /owned overrides
+                // the Liquid whenever `available` is true. The previous version
+                // had NEITHER - it credited every order from its BILLING date,
+                // so on the test account it would have claimed ~8 months against
+                // the Liquid's 2 and told customers they owned manga that was
+                // billed but never shipped.
+                const fulfilledAt = o.displayFulfillmentStatus === "FULFILLED"
+                    && o.fulfillments && o.fulfillments[0] && o.fulfillments[0].createdAt;
+                const month = fulfilledAt ? shipMonthFromFulfilment(fulfilledAt) : null;
                 (o.lineItems?.nodes || []).forEach((li) => {
                     if (li.sku) skus.push(li.sku);
-                    // Monthly Manga Box line → credit the shipped box's featured manga.
-                    // Box month = BILLING MONTH + 1 ("May box billed in April"; the
-                    // storefront cutoff copy says subscribe by the 21st for next
-                    // month's box). Rebills cluster on the 21st with Appstle
-                    // stragglers into the 22nd, so the boundary is day <= 22 ->
-                    // +1 month; day >= 23 -> +2 (the "box in ~6 weeks" case).
-                    // Dates shifted -7h to approximate store time (PDT).
-                    if (li.product?.id?.endsWith(`/${BOX_PRODUCT_ID}`)) {
-                        const d = new Date(new Date(o.createdAt).getTime() - 7 * 3600 * 1000);
-                        const delta = d.getUTCDate() <= 22 ? 1 : 2;
-                        const midx = d.getUTCMonth() + delta; // 0-based month index, may overflow year
-                        const month = `${d.getUTCFullYear() + Math.floor(midx / 12)}-${String((midx % 12) + 1).padStart(2, "0")}`;
-                        if (li.variant?.id?.endsWith(`/${BOX_VARIANT_2MANGA_ID}`)) boxMonths2.add(month);
-                        else boxMonths.add(month);
-                    }
+                    const tier = boxTier(li);
+                    if (!tier || !month) return;   // unshipped box credits nothing
+                    if (tier === "2") boxMonths2.add(month);
+                    else boxMonths.add(month);
                 });
             });
             if (!orders.pageInfo.hasNextPage) break;
