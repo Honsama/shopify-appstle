@@ -667,7 +667,20 @@ async function addToBoxHandler(req, res) {
                 if (attempt > 1) {
                     console.warn(`proxy/add-line-item: variant ${variantId} succeeded on attempt ${attempt}.`);
                 }
-                return res.status(200).json({ ok: true, contractId: contract.id, data: response.data });
+                // `attempts` and `ms` are diagnostics, not decoration. The retry
+                // is invisible from outside otherwise: a recovered add looks
+                // exactly like a slow one, and the only place that recorded the
+                // difference was a Vercel log nobody could reach. A real run on
+                // 6 Sep had one add at 11,281ms against 3,270-3,757ms for the
+                // other seven, and there was no way to tell whether the retry
+                // had fired or Appstle was simply slow that once.
+                return res.status(200).json({
+                    ok: true,
+                    contractId: contract.id,
+                    attempts: attempt,
+                    ms: Date.now() - startedAt,
+                    data: response.data,
+                });
             } catch (error) {
                 lastError = error;
                 const elapsed = Date.now() - startedAt;
@@ -712,7 +725,12 @@ async function addToBoxHandler(req, res) {
         // 409 rather than 200: the client treats any non-2xx as a failed
         // volume, which is correct and must not change. Returning 200 the way
         // /owned does would silently mark failed volumes as added.
-        res.status(409).json({ ok: false, error: "Failed to add to box.", details: upstream || error.message });
+        res.status(409).json({
+            ok: false,
+            error: "Failed to add to box.",
+            ms: Date.now() - (req._addStartedAt || Date.now()),
+            details: upstream || error.message,
+        });
     }
 }
 
