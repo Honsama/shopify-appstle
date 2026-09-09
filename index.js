@@ -1276,10 +1276,20 @@ function seriesListToggleHandler(add, mf, verb) {
         }
     };
 }
-// POST owned-declare — set a claim, set/clear one exception, or retract.
+// POST owned-declare — set a claim, set/clear exceptions, or retract.
 //   { seriesKey, upTo }            "I own up to Vol N"  (upTo 0 clears it)
+//   { seriesKey, upTo, except:[] } ...and the volumes in that run they do NOT
+//                                  have. Replaces the whole exception set for
+//                                  the series, so it is one atomic write.
 //   { seriesKey, volume, owned }   set (owned:false) or clear (owned:true) one
 //   { seriesKey, retract:true }    delete this customer's own entries
+//
+// `except` EXISTS BECAUSE COLLECTIONS ARE NOT ALWAYS CONTIGUOUS. Ricky,
+// 9 Sep 2026: "If i owned vol 2 of 100 ghost stories. I can't select only
+// that." Owning Vol 2 alone is upTo:2 with except:[1]. Sending the claim and
+// its exceptions as separate requests would work, but a failure between them
+// leaves a shelf claiming volumes the customer just said they do not have -
+// so they travel together and are written once.
 //
 // Same optimistic-concurrency dance as the follow/favourite toggles: read the
 // list with its compareDigest, rebuild, write it back, and re-read on
@@ -1303,9 +1313,13 @@ async function ownedDeclareHandler(req, res) {
     const retract = body.retract === true;
     const hasUpTo = Object.prototype.hasOwnProperty.call(body, "upTo");
     const hasVolume = Object.prototype.hasOwnProperty.call(body, "volume");
+    const hasExcept = Array.isArray(body.except);
     const upTo = hasUpTo ? parseInt(body.upTo, 10) : null;
     const volume = hasVolume ? parseInt(body.volume, 10) : null;
     const owned = body.owned !== false;   // default true = clear the exception
+    const except = hasExcept
+        ? body.except.map(function (v) { return parseInt(v, 10); })
+        : [];
 
     if (!retract && !hasUpTo && !hasVolume) {
         return res.status(400).json({ error: "Nothing to change." });
@@ -1315,6 +1329,22 @@ async function ownedDeclareHandler(req, res) {
     }
     if (hasVolume && (!Number.isInteger(volume) || volume < 1 || volume > OWNED_MAX_VOL)) {
         return res.status(400).json({ error: "Invalid volume." });
+    }
+    if (hasExcept) {
+        if (!hasUpTo) {
+            return res.status(400).json({ error: "except needs upTo." });
+        }
+        if (except.length > OWNED_MAX_VOL) {
+            return res.status(400).json({ error: "Too many exceptions." });
+        }
+        for (let i = 0; i < except.length; i++) {
+            // Outside the claimed run an exception has nothing to suppress -
+            // it cannot reach a purchased volume - so reject rather than
+            // silently store an entry that will never do anything.
+            if (!Number.isInteger(except[i]) || except[i] < 1 || except[i] > upTo) {
+                return res.status(400).json({ error: "Invalid exception volume." });
+            }
+        }
     }
 
     try {
@@ -1332,12 +1362,20 @@ async function ownedDeclareHandler(req, res) {
                     return !((c && c[1] === seriesKey) || (e && e[1] === seriesKey));
                 }
                 if (hasUpTo && c && c[1] === seriesKey) return false;
+                // Replacing the set wholesale: drop every exception for this
+                // series, then re-add exactly what came in.
+                if (hasExcept && e && e[1] === seriesKey) return false;
                 if (hasVolume && e && e[1] === seriesKey && parseInt(e[2], 10) === volume) return false;
                 return true;
             });
 
             if (!retract) {
                 if (hasUpTo && upTo > 0) next.push(seriesKey + ":" + upTo + ":" + ts);
+                if (hasExcept && upTo > 0) {
+                    except.forEach(function (v) {
+                        next.push("-" + volSku(seriesKey, v) + ":" + ts);
+                    });
+                }
                 if (hasVolume && !owned) next.push("-" + volSku(seriesKey, volume) + ":" + ts);
             }
 
