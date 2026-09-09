@@ -925,6 +925,7 @@ async function ownedHandler(req, res) {
                                 pageInfo { hasNextPage endCursor }
                                 nodes {
                                     createdAt
+                                    cancelledAt
                                     displayFulfillmentStatus
                                     fulfillments(first: 1) { createdAt }
                                     lineItems(first: 100) {
@@ -957,8 +958,36 @@ async function ownedHandler(req, res) {
                 const fulfilledAt = o.displayFulfillmentStatus === "FULFILLED"
                     && o.fulfillments && o.fulfillments[0] && o.fulfillments[0].createdAt;
                 const month = fulfilledAt ? shipMonthFromFulfilment(fulfilledAt) : null;
+                // A CANCELLED ORDER THAT NEVER SHIPPED IS NOT A PURCHASE, and its
+                // SKUs were being collected anyway: the push below was the one line
+                // in this handler with no gate on it, and the query did not even ask
+                // for cancelledAt, so a cancellation was invisible here.
+                //
+                // Found 9 Sep 2026. Ricky took the $1 Kindergarten Wars with his first
+                // box on the redesign theme and cancelled eleven minutes later - order
+                // #HONSAMA4314, no fulfilment at all, nothing picked or posted - and the
+                // volume stayed on his shelf. The same fix landed in
+                // snippets/hn-owned-data.liquid first and changed nothing a customer
+                // could see, because THIS ROUTE OVERRIDES that Liquid whenever available
+                // is true. Fixing the theme alone cannot fix this page; if you are
+                // reading that Liquid guard and wondering why it has no effect, this is
+                // why.
+                //
+                // ORDER-LEVEL, NOT PER LINE, unlike the Liquid, and deliberately. The
+                // Liquid can ask each line whether it shipped; the only honest signal
+                // here is whether the ORDER carries any fulfilment, because
+                // unfulfilledQuantity is not trustworthy on a cancelled order - on
+                // #HONSAMA4314 the cancelled Kindergarten Wars line reported
+                // unfulfilledQuantity 0 while nothing had ever been picked.
+                //
+                // So: cancelled AND no fulfilment means nothing shipped, drop it.
+                // Cancelled WITH a fulfilment keeps everything, erring toward the
+                // customer keeping what they may physically hold - the same direction
+                // the fulfilled-order rule above already errs.
+                const cancelledUnshipped = !!o.cancelledAt
+                    && !(o.fulfillments && o.fulfillments.length);
                 (o.lineItems?.nodes || []).forEach((li) => {
-                    if (li.sku) skus.push(li.sku);
+                    if (li.sku && !cancelledUnshipped) skus.push(li.sku);
                     const tier = boxTier(li);
                     if (!tier || !month) return;   // unshipped box credits nothing
                     if (tier === "2") boxMonths2.add(month);
