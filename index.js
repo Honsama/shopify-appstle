@@ -118,7 +118,7 @@ function requireAppToken(req, res, next) {
     // Proxy ("Appstle API Connector Honsama") already targets this prefix —
     // they carry their own auth (Shopify's App Proxy signature +
     // logged_in_customer_id) — the bearer gate must never apply to them.
-    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow", "/favorite", "/unfavorite"];
+    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/owned-declare", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow", "/favorite", "/unfavorite"];
     if (SIGNED_PATHS.indexOf(req.path) !== -1) return next();
     if (!process.env.APP_API_TOKEN) {
         console.warn("APP_API_TOKEN not set - denying legacy /api/appstle request (fail-closed).");
@@ -997,10 +997,22 @@ async function ownedHandler(req, res) {
             if (!orders.pageInfo.hasNextPage) break;
             after = orders.pageInfo.endCursor;
         }
+        // Fold in what the customer has told us they own. Read failures are
+        // non-fatal: a shelf short of a declaration is a far smaller problem
+        // than a shelf that fails to load, and the client keeps its Liquid
+        // data if this route errors entirely.
+        let declared = [];
+        try {
+            const d = await readFollowing(req.customerId, OWNED_METAFIELD);
+            declared = d.keys || [];
+        } catch (e) {
+            console.warn("proxy/owned: declarations unavailable:", e.message);
+        }
+
         res.status(200).json({
             available: true,
             orders: orderCount,
-            skus: Array.from(new Set(skus)),
+            skus: applyDeclarations(Array.from(new Set(skus)), declared),
             boxMonths: Array.from(boxMonths).sort(),
             boxMonths2: Array.from(boxMonths2).sort(),
         });
@@ -1044,6 +1056,87 @@ var FOLLOW_METAFIELD = { namespace: "honsama", key: "following" };
 // sibling metafield — same list type, same seriesKey values.
 var FAVORITES_METAFIELD = { namespace: "honsama", key: "favorites" };
 var FOLLOW_CAP = 300; // sanity ceiling; nobody follows 300 series
+
+// ---- customer-declared ownership (My Library) --------------------------
+// Spec: HonsamaOps/Honsama Library Ownership/OWNERSHIP_SPEC.md
+//
+// The shelf otherwise shows only what someone bought FROM Honsama, so a
+// collector who already owns volumes opens on a wall of gaps and is then sold
+// volumes they have. These entries let them say so.
+//
+// Two entry shapes, stored in one list metafield:
+//   "M-KD-TFFBD:8:1757380000"     claim     - I own up to Vol 8
+//   "-M-KD-TFFBD-02:1757380000"   exception - except Vol 2
+//
+// ADDITIVE ONLY, AND THAT IS ENFORCED BY THE CODE, NOT BY THE UI. A
+// declaration can never remove a volume Honsama shipped: applyDeclarations
+// below only ever PUSHES, so there is no path through it that drops a SKU
+// derived from an order. A general "remove this title" was specced and cut on
+// 9 Sep 2026 (Ricky: "dont let them hide a series"); the customer can retract
+// their OWN entry, which is a different thing and leaves purchased volumes
+// standing.
+//
+// NO TIMESTAMP PRECEDENCE, deliberately. An earlier draft of the spec had
+// "most recent fact wins" so a later purchase could beat an older exception.
+// It is unnecessary once exceptions only ever suppress a CLAIMED volume:
+// a purchase always wins because the exception never reaches it. The
+// timestamp is retained in the stored value for support and display only, and
+// nothing reads it. Keeping it out of the comparison is also what lets the
+// Liquid fallback implement identical rules without doing date maths.
+var OWNED_METAFIELD = { namespace: "honsama", key: "owned_upto" };
+var OWNED_CAP = 600;      // claims + exceptions across every series
+// 200 rather than 999 because the LIQUID FALLBACK has to loop this range to
+// synthesise the claimed SKUs, and the two paths must apply identical rules.
+// 600 x 999 iterations would be a real cost on a page render; 600 x 200 is
+// survivable, and the longest series in the catalogue is 14 volumes, so the
+// ceiling is unreachable in practice by anyone acting in good faith.
+var OWNED_MAX_VOL = 200;
+var CLAIM_RE = /^([A-Z]+-[A-Z]+-[A-Z0-9&]+):(\d{1,3}):(\d{1,13})$/;
+var EXCEPT_RE = /^-([A-Z]+-[A-Z]+-[A-Z0-9&]+)-(\d{1,3}):(\d{1,13})$/;
+
+// Volume SKUs are zero-padded to two digits ("-01"), and wider only past 99,
+// which is how every SKU in the catalogue is shaped.
+function volSku(seriesKey, n) {
+    return seriesKey + "-" + (n < 10 ? "0" + n : String(n));
+}
+
+function parseDeclarations(entries) {
+    var claims = {}, exceptions = {};
+    (entries || []).forEach(function (raw) {
+        var v = String(raw || "").trim().toUpperCase();
+        var m = CLAIM_RE.exec(v);
+        if (m) {
+            var n = parseInt(m[2], 10);
+            // Highest claim wins if the list somehow carries two for one
+            // series; the write path replaces rather than appends, so this is
+            // belt and braces against a partial write.
+            if (!claims[m[1]] || n > claims[m[1]]) claims[m[1]] = n;
+            return;
+        }
+        m = EXCEPT_RE.exec(v);
+        if (m) exceptions[volSku(m[1], parseInt(m[2], 10))] = true;
+    });
+    return { claims: claims, exceptions: exceptions };
+}
+
+// Returns a NEW array. Never removes: see the additive-only note above.
+function applyDeclarations(skus, entries) {
+    var d = parseDeclarations(entries);
+    var out = (skus || []).slice();
+    var have = {};
+    out.forEach(function (x) { have[String(x || "").toUpperCase()] = true; });
+    Object.keys(d.claims).forEach(function (key) {
+        var upTo = Math.min(d.claims[key], OWNED_MAX_VOL);
+        for (var n = 1; n <= upTo; n++) {
+            var sku = volSku(key, n);
+            if (d.exceptions[sku]) continue;  // they say they do not have this one
+            if (have[sku]) continue;          // already owned from an order
+            out.push(sku);
+            have[sku] = true;
+        }
+    });
+    return out;
+}
 
 async function adminGraphql(query, variables) {
     const response = await axios.post(
@@ -1183,6 +1276,88 @@ function seriesListToggleHandler(add, mf, verb) {
         }
     };
 }
+// POST owned-declare — set a claim, set/clear one exception, or retract.
+//   { seriesKey, upTo }            "I own up to Vol N"  (upTo 0 clears it)
+//   { seriesKey, volume, owned }   set (owned:false) or clear (owned:true) one
+//   { seriesKey, retract:true }    delete this customer's own entries
+//
+// Same optimistic-concurrency dance as the follow/favourite toggles: read the
+// list with its compareDigest, rebuild, write it back, and re-read on
+// STALE_OBJECT rather than replaying a stale list. See the long note on
+// seriesListToggleHandler for why that matters - two writes 1.2s apart were
+// enough to lose a real customer's data before it was added.
+//
+// IT ONLY EVER TOUCHES THE METAFIELD. Nothing here can remove a SKU derived
+// from an order, which is what makes "retract" safe to expose: the worst it
+// can do is delete the customer's own claim and leave what was shipped.
+async function ownedDeclareHandler(req, res) {
+    const body = req.body || {};
+    const seriesKey = String(body.seriesKey || "").trim().toUpperCase();
+    if (!SERIES_KEY_RE.test(seriesKey) || seriesKey.length > 32) {
+        return res.status(400).json({ error: "Invalid seriesKey." });
+    }
+    if (!ADMIN_API_TOKEN) {
+        return res.status(503).json({ error: "Library editing is not configured yet." });
+    }
+
+    const retract = body.retract === true;
+    const hasUpTo = Object.prototype.hasOwnProperty.call(body, "upTo");
+    const hasVolume = Object.prototype.hasOwnProperty.call(body, "volume");
+    const upTo = hasUpTo ? parseInt(body.upTo, 10) : null;
+    const volume = hasVolume ? parseInt(body.volume, 10) : null;
+    const owned = body.owned !== false;   // default true = clear the exception
+
+    if (!retract && !hasUpTo && !hasVolume) {
+        return res.status(400).json({ error: "Nothing to change." });
+    }
+    if (hasUpTo && (!Number.isInteger(upTo) || upTo < 0 || upTo > OWNED_MAX_VOL)) {
+        return res.status(400).json({ error: "Invalid upTo." });
+    }
+    if (hasVolume && (!Number.isInteger(volume) || volume < 1 || volume > OWNED_MAX_VOL)) {
+        return res.status(400).json({ error: "Invalid volume." });
+    }
+
+    try {
+        for (let attempt = 1; attempt <= TOGGLE_ATTEMPTS; attempt++) {
+            const { keys, digest } = await readFollowing(req.customerId, OWNED_METAFIELD);
+            const ts = Math.floor(Date.now() / 1000);
+
+            // Drop whatever this request supersedes, then re-add. Replace
+            // rather than append, so a series can never accumulate two claims.
+            const next = keys.filter(function (raw) {
+                const v = String(raw || "").trim().toUpperCase();
+                const c = CLAIM_RE.exec(v);
+                const e = EXCEPT_RE.exec(v);
+                if (retract) {
+                    return !((c && c[1] === seriesKey) || (e && e[1] === seriesKey));
+                }
+                if (hasUpTo && c && c[1] === seriesKey) return false;
+                if (hasVolume && e && e[1] === seriesKey && parseInt(e[2], 10) === volume) return false;
+                return true;
+            });
+
+            if (!retract) {
+                if (hasUpTo && upTo > 0) next.push(seriesKey + ":" + upTo + ":" + ts);
+                if (hasVolume && !owned) next.push("-" + volSku(seriesKey, volume) + ":" + ts);
+            }
+
+            if (next.length > OWNED_CAP) {
+                return res.status(400).json({ error: "Too many library entries." });
+            }
+
+            if (await writeFollowing(req.customerId, next, OWNED_METAFIELD, digest)) {
+                return res.status(200).json({ ok: true, owned_upto: next });
+            }
+
+            console.warn(`proxy/owned-declare: stale metafield, retry ${attempt}/${TOGGLE_ATTEMPTS}`);
+            await new Promise((r) => setTimeout(r, 80 * attempt));
+        }
+        res.status(409).json({ error: "Library is busy, please try again." });
+    } catch (error) {
+        return upstreamFailure(res, "owned-declare", error, "Failed to save your library.");
+    }
+}
+
 function followToggleHandler(add) { return seriesListToggleHandler(add, FOLLOW_METAFIELD, "Follow"); }
 function favoriteToggleHandler(add) { return seriesListToggleHandler(add, FAVORITES_METAFIELD, "Favorite"); }
 
@@ -1304,6 +1479,9 @@ app.get("/api/appstle/box", verifyAppProxy, requireAppstleKey, boxHandler);
 app.post("/api/appstle/box-add", verifyAppProxy, requireAppstleKey, addToBoxHandler);
 // /owned talks to the Admin API, not Appstle — signature only, no Appstle key.
 app.get("/api/appstle/owned", verifyAppProxy, ownedHandler);
+// Customer-declared ownership — Admin API only, same as /owned.
+app.post("/proxy/owned-declare", ownedDeclareHandler);
+app.post("/api/appstle/owned-declare", verifyAppProxy, ownedDeclareHandler);
 // Follow-series toggles also talk to the Admin API only (customer metafield).
 app.post("/proxy/follow", followToggleHandler(true));
 app.post("/proxy/unfollow", followToggleHandler(false));
