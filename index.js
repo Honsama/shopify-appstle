@@ -1085,7 +1085,12 @@ var FOLLOW_CAP = 300; // sanity ceiling; nobody follows 300 series
 // Liquid fallback implement identical rules without doing date maths.
 var OWNED_METAFIELD = { namespace: "honsama", key: "owned_upto" };
 var OWNED_CAP = 600;      // claims + exceptions across every series
-var OWNED_MAX_VOL = 999;
+// 200 rather than 999 because the LIQUID FALLBACK has to loop this range to
+// synthesise the claimed SKUs, and the two paths must apply identical rules.
+// 600 x 999 iterations would be a real cost on a page render; 600 x 200 is
+// survivable, and the longest series in the catalogue is 14 volumes, so the
+// ceiling is unreachable in practice by anyone acting in good faith.
+var OWNED_MAX_VOL = 200;
 var CLAIM_RE = /^([A-Z]+-[A-Z]+-[A-Z0-9&]+):(\d{1,3}):(\d{1,13})$/;
 var EXCEPT_RE = /^-([A-Z]+-[A-Z]+-[A-Z0-9&]+)-(\d{1,3}):(\d{1,13})$/;
 
