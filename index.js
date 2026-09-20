@@ -118,7 +118,7 @@ function requireAppToken(req, res, next) {
     // Proxy ("Appstle API Connector Honsama") already targets this prefix —
     // they carry their own auth (Shopify's App Proxy signature +
     // logged_in_customer_id) — the bearer gate must never apply to them.
-    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/owned-declare", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow", "/favorite", "/unfavorite"];
+    var SIGNED_PATHS = ["/box", "/box-add", "/owned", "/owned-declare", "/box-details", "/box-remove", "/box-skip", "/box-discount", "/follow", "/unfollow", "/favorite", "/unfavorite", "/referral-claim"];
     if (SIGNED_PATHS.indexOf(req.path) !== -1) return next();
     if (!process.env.APP_API_TOKEN) {
         console.warn("APP_API_TOKEN not set - denying legacy /api/appstle request (fail-closed).");
@@ -1399,6 +1399,190 @@ async function ownedDeclareHandler(req, res) {
 function followToggleHandler(add) { return seriesListToggleHandler(add, FOLLOW_METAFIELD, "Follow"); }
 function favoriteToggleHandler(add) { return seriesListToggleHandler(add, FAVORITES_METAFIELD, "Favorite"); }
 
+// ---- Referral claim ("Pass It On"), signed + own-customer-only -----------
+// POST referral-claim { pick, note? } — the referrer claims the free book a
+// friend's subscription earned them. `pick` is one of the swap picker's own
+// value strings: "Continue: <Series> — next volume" | "Past box: <Title> Vol. 1".
+//
+// Authority lives server-side, never in the page:
+//   1. The customer's `honsama.referrals` ledger (json; written on the 23rd by
+//      HonsamaOps\Honsama Referral\referral_ledger.py) must hold an EARNED entry
+//      with no claim. Otherwise 403 — a subscriber with no referral cannot use
+//      this to add a penny book to their box.
+//   2. The pick is resolved to ONE variant: "Past box" → that title's Vol. 1;
+//      "Continue" → the lowest volume above the highest one they own (order-line
+//      SKUs + honsama.box_swaps IN skus; default Vol. 2, since a featured Vol. 1
+//      came in the box). Unresolvable → recorded as PICKED_MANUAL, no contract
+//      write, the 23rd checklist surfaces it for a hand add.
+//   3. The variant is added to their ACTIVE contract as a ONE-TIME line at $0.01
+//      through Appstle's custom-price endpoint (Appstle's price floor is 0.01;
+//      0.00 is rejected). It bills at the next renewal, lands on that order, is
+//      picked up by the 21st add-on calculator and appears on the packing list —
+//      the reward rides the order, so there is no side checklist to forget.
+//   4. The ledger entry is stamped CLAIMING before the Appstle call and CLAIMED
+//      after it, so a double-tap or a crash between the two can never add two
+//      lines: CLAIMING is not claimable and the 23rd run flags it.
+var REFERRALS_METAFIELD = { namespace: "honsama", key: "referrals" };
+var BOX_SWAPS_METAFIELD = { namespace: "honsama", key: "box_swaps" };
+var REFERRAL_PRICE = "0.01";
+var claimLocks = new Map(); // customerId -> ts (one claim in flight per customer)
+
+async function readJsonMetafield(customerId, mf) {
+    const data = await adminGraphql(
+        `query MF($id: ID!) { customer(id: $id) { metafield(namespace: "${mf.namespace}", key: "${mf.key}") { value } } }`,
+        { id: `gid://shopify/Customer/${customerId}` }
+    );
+    const raw = data?.customer?.metafield?.value;
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+async function writeJsonMetafield(customerId, mf, obj) {
+    const data = await adminGraphql(
+        `mutation SetJson($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) { metafields { id } userErrors { field message } }
+        }`,
+        { metafields: [{ ownerId: `gid://shopify/Customer/${customerId}`, namespace: mf.namespace, key: mf.key, type: "json", value: JSON.stringify(obj) }] }
+    );
+    const errs = data?.metafieldsSet?.userErrors || [];
+    if (errs.length) throw new Error(JSON.stringify(errs));
+}
+
+// All listed volumes of a series, keyed by volume number, from the products
+// whose title starts with the series name. seriesKey = the SKU prefix shared
+// by most of them (manga "M-" families win over a light-novel sibling).
+async function seriesFamily(series) {
+    const q = `title:"${series.replace(/"/g, "")}"`;
+    const data = await adminGraphql(
+        `query Fam($q: String!) { products(first: 25, query: $q) { nodes { title variants(first: 5) { nodes { id sku } } } } }`,
+        { q }
+    );
+    const s = series.toLowerCase();
+    const rows = [];
+    (data?.products?.nodes || []).forEach((p) => {
+        if (!String(p.title || "").toLowerCase().startsWith(s)) return;
+        (p.variants?.nodes || []).forEach((v) => {
+            const m = /^(.+)-(\d{2,})$/.exec(String(v.sku || ""));
+            if (m) rows.push({ seriesKey: m[1], vol: parseInt(m[2], 10), variantId: String(v.id).split("/").pop(), sku: v.sku, title: p.title });
+        });
+    });
+    if (!rows.length) return { seriesKey: null, vols: {} };
+    const counts = {};
+    rows.forEach((r) => { counts[r.seriesKey] = (counts[r.seriesKey] || 0) + 1; });
+    const seriesKey = Object.keys(counts).sort((a, b) =>
+        (b.startsWith("M-") - a.startsWith("M-")) || (counts[b] - counts[a]))[0];
+    const vols = {};
+    rows.filter((r) => r.seriesKey === seriesKey).forEach((r) => { if (!vols[r.vol]) vols[r.vol] = r; });
+    return { seriesKey, vols };
+}
+
+// Volumes of one series the customer already has: every order-line SKU with the
+// series prefix, plus IN skus from honsama.box_swaps ("YYYY-MM:OUT>IN").
+async function ownedVolumes(customerId, seriesKey) {
+    const owned = new Set();
+    if (!seriesKey) return owned;
+    const prefix = seriesKey + "-";
+    const take = (sku) => { const m = /^(.+)-(\d{2,})$/.exec(String(sku || "")); if (m && m[1] === seriesKey) owned.add(parseInt(m[2], 10)); };
+    let after = null;
+    for (let page = 0; page < 30; page++) {
+        const data = await adminGraphql(
+            `query OwnedSkus($id: ID!, $after: String) { customer(id: $id) { orders(first: 100, after: $after) {
+                pageInfo { hasNextPage endCursor } nodes { cancelledAt lineItems(first: 100) { nodes { sku } } } } } }`,
+            { id: `gid://shopify/Customer/${customerId}`, after }
+        );
+        const orders = data?.customer?.orders;
+        if (!orders) break;
+        orders.nodes.forEach((o) => { if (!o.cancelledAt) (o.lineItems?.nodes || []).forEach((li) => { if (li.sku && li.sku.startsWith(prefix)) take(li.sku); }); });
+        if (!orders.pageInfo.hasNextPage) break;
+        after = orders.pageInfo.endCursor;
+    }
+    try {
+        const swaps = await readFollowing(customerId, BOX_SWAPS_METAFIELD); // list of "YYYY-MM:OUT>IN"
+        swaps.forEach((s) => { const inSku = String(s).split(">")[1]; if (inSku) take(inSku); });
+    } catch (e) { /* best effort */ }
+    return owned;
+}
+
+async function contractSkus(contractId) {
+    const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details?subscriptionContractId=${contractId}&page=0&size=10&sort=id,desc`;
+    const details = await axios.get(url, { headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" } });
+    const rows = Array.isArray(details.data) ? details.data : [];
+    rows.forEach((item) => {
+        ["contractDetailsJSON", "orderNoteAttributes", "lastSuccessfulOrder"].forEach((f) => {
+            if (typeof item[f] === "string") { try { item[f] = JSON.parse(item[f]); } catch (e) { /* leave */ } }
+        });
+    });
+    return Array.from(new Set(collectSkus(rows)));
+}
+
+async function referralClaimHandler(req, res) {
+    if (!ADMIN_API_TOKEN) return res.status(503).json({ error: "Referral claims are not configured yet." });
+    const pick = String((req.body || {}).pick || "").trim().slice(0, 200);
+    const note = String((req.body || {}).note || "").trim().slice(0, 200);
+    const mCont = pick.match(/^Continue:\s*(.+?)\s*[\u2014\u2013-]+\s*next volume$/i);
+    const mPast = pick.match(/^Past box:\s*(.+?)\s*Vol\.?\s*1$/i);
+    if (!mCont && !mPast) return res.status(400).json({ error: "Unrecognised pick." });
+    const series = (mCont || mPast)[1];
+    const cid = req.customerId;
+    const now = Date.now();
+    if (claimLocks.get(cid) && now - claimLocks.get(cid) < 30000) {
+        return res.status(429).json({ error: "Hang on \u2014 your last claim is still being processed." });
+    }
+    claimLocks.set(cid, now);
+    let ledger = null, entry = null;
+    try {
+        ledger = await readJsonMetafield(cid, REFERRALS_METAFIELD);
+        const entries = (ledger && Array.isArray(ledger.referrals)) ? ledger.referrals : [];
+        entry = entries.find((e) => e && e.status === "EARNED" && !e.claimed_at) || null;
+        if (!entry) return res.status(403).json({ error: "No book to claim right now." });
+        const contract = await getContractForCustomer(cid);
+        if (!contract) return res.status(403).json({ error: "Your subscription needs to be active to claim \u2014 resume it first and come back." });
+
+        const fam = await seriesFamily(series);
+        let target = null, reason = null;
+        if (mPast) {
+            target = fam.vols[1] || null;
+            reason = target ? null : "no Vol. 1 listing found";
+        } else {
+            const owned = await ownedVolumes(cid, fam.seriesKey);
+            const maxOwned = owned.size ? Math.max.apply(null, Array.from(owned)) : 1;
+            const want = maxOwned + 1;
+            target = fam.vols[want] || null;
+            reason = target ? null : `Vol. ${want} not listed (owns up to ${maxOwned})`;
+        }
+        const stamp = new Date().toISOString();
+        if (!target) {
+            Object.assign(entry, { status: "PICKED_MANUAL", pick, note, claimed_at: stamp, manual_reason: reason, contract: contract.id });
+            await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
+            return res.status(200).json({ ok: true, manual: true, message: "Got it \u2014 that one needs a hand from us. We\u2019ll add it and email you." });
+        }
+        const onBox = await contractSkus(contract.id);
+        if (onBox.indexOf(target.sku) !== -1) {
+            return res.status(409).json({ error: `${target.title} is already in your next box \u2014 pick something else.` });
+        }
+        // Stamp CLAIMING first so a retry can't add a second line if we die mid-way.
+        Object.assign(entry, { status: "CLAIMING", pick, note, claimed_at: stamp, pick_title: target.title, pick_sku: target.sku, pick_variant: target.variantId, contract: contract.id, price: REFERRAL_PRICE });
+        await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
+        try {
+            const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-add-line-item?contractId=${contract.id}&quantity=1&variantId=${target.variantId}&price=${REFERRAL_PRICE}&isOneTimeProduct=true`;
+            await axios.put(url, {}, { headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" } });
+        } catch (upstream) {
+            // Appstle refused: hand the entry back so they can try again.
+            Object.assign(entry, { status: "EARNED", claimed_at: null, last_error: String(upstream.response?.data?.message || upstream.message || "appstle").slice(0, 200) });
+            await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
+            throw upstream;
+        }
+        entry.status = "CLAIMED";
+        await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger); // if THIS fails the entry stays CLAIMING (flagged on the 23rd), never re-claimable
+        res.status(200).json({ ok: true, title: target.title, sku: target.sku });
+    } catch (error) {
+        console.error("proxy/referral-claim error:", error.response?.data || error.message);
+        res.status(502).json({ error: "Couldn\u2019t add the book just now. Try again in a minute." });
+    } finally {
+        claimLocks.delete(cid);
+    }
+}
+
 // ---- Drawer operations, signed + own-contract-only ----------------------
 // These four port the cart drawer off the unauthenticated legacy routes.
 // The client NEVER sends a contractId — it's resolved server-side from the
@@ -1530,6 +1714,9 @@ app.post("/proxy/favorite", favoriteToggleHandler(true));
 app.post("/proxy/unfavorite", favoriteToggleHandler(false));
 app.post("/api/appstle/favorite", verifyAppProxy, favoriteToggleHandler(true));
 app.post("/api/appstle/unfavorite", verifyAppProxy, favoriteToggleHandler(false));
+
+app.post("/proxy/referral-claim", referralClaimHandler);
+app.post("/api/appstle/referral-claim", verifyAppProxy, requireAppstleKey, referralClaimHandler);
 // Drawer operations (signed): /apps/appstle-proxy/box-* → here.
 app.get("/proxy/box-details", boxDetailsHandler);
 app.post("/proxy/box-remove", boxRemoveHandler);
