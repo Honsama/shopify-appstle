@@ -1448,32 +1448,46 @@ async function writeJsonMetafield(customerId, mf, obj) {
     if (errs.length) throw new Error(JSON.stringify(errs));
 }
 
-// All listed volumes of a series, keyed by volume number, from the products
-// whose title starts with the series name. seriesKey = the SKU prefix shared
-// by most of them (manga "M-" families win over a light-novel sibling).
-async function seriesFamily(series) {
-    const q = `title:"${series.replace(/"/g, "")}"`;
-    const data = await adminGraphql(
-        `query Fam($q: String!) { products(first: 25, query: $q) { nodes { title variants(first: 5) { nodes { id sku } } } } }`,
-        { q }
-    );
-    const s = series.toLowerCase();
-    const rows = [];
-    (data?.products?.nodes || []).forEach((p) => {
-        if (!String(p.title || "").toLowerCase().startsWith(s)) return;
-        (p.variants?.nodes || []).forEach((v) => {
-            const m = /^(.+)-(\d{2,})$/.exec(String(v.sku || ""));
-            if (m) rows.push({ seriesKey: m[1], vol: parseInt(m[2], 10), variantId: String(v.id).split("/").pop(), sku: v.sku, title: p.title });
-        });
-    });
-    if (!rows.length) return { seriesKey: null, vols: {} };
-    const counts = {};
-    rows.forEach((r) => { counts[r.seriesKey] = (counts[r.seriesKey] || 0) + 1; });
-    const seriesKey = Object.keys(counts).sort((a, b) =>
-        (b.startsWith("M-") - a.startsWith("M-")) || (counts[b] - counts[a]))[0];
-    const vols = {};
-    rows.filter((r) => r.seriesKey === seriesKey).forEach((r) => { if (!vols[r.vol]) vols[r.vol] = r; });
-    return { seriesKey, vols };
+// One listed volume of a series -> { seriesKey, vol, variantId, sku, title }, or null.
+//
+// NOT the Admin API. This app's token has never had read_products (see the
+// bookshelf notes above), and the first cut of the claim route queried
+// `products(query:)` anyway - every live claim died on "Access denied for
+// products field" (found 2026-09-21 with the test account). The storefront
+// publishes the same facts without a scope: /products/<handle>.js is the
+// product with its variants (id, sku), and /search/suggest.json finds the
+// handle when the guessed one is off. Both are CDN-fast.
+//
+// The handle is guessed from the title the way Shopify makes them
+// ("What If I Said, "I Love You"? Vol. 2" -> what-if-i-said-i-love-you-vol-2)
+// and tried first; predictive search is the fallback, matched on the exact
+// "<Series> Vol. <n>" title so a sibling volume can never stand in.
+const STOREFRONT = "https://honsama.com";
+function handleFor(title) {
+    return String(title).toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")
+        .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function volumeRow(product, vol) {
+    const variants = product?.variants || [];
+    const v = variants.find((x) => new RegExp(`-0*${vol}$`).test(String(x.sku || ""))) || variants[0];
+    if (!v) return null;
+    const m = /^(.+)-(\d{2,})$/.exec(String(v.sku || ""));
+    return { seriesKey: m ? m[1] : null, vol, variantId: String(v.id), sku: v.sku || "", title: product.title };
+}
+async function findVolume(series, vol) {
+    const want = new RegExp(`^${series.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+Vol\\.?\\s*0*${vol}$`, "i");
+    // 1. the guessed handle
+    try {
+        const r = await axios.get(`${STOREFRONT}/products/${handleFor(`${series} Vol. ${vol}`)}.js`, { timeout: 6000, validateStatus: (s) => s === 200 });
+        if (r.data && want.test(String(r.data.title || ""))) return volumeRow(r.data, vol);
+    } catch (e) { /* fall through to search */ }
+    // 2. predictive search, exact title match, then the product's own JSON
+    const q = encodeURIComponent(`${series} Vol. ${vol}`);
+    const s = await axios.get(`${STOREFRONT}/search/suggest.json?q=${q}&resources[type]=product&resources[limit]=10`, { timeout: 6000 });
+    const hit = (s.data?.resources?.results?.products || []).find((p) => want.test(String(p.title || "")));
+    if (!hit) return null;
+    const r = await axios.get(`${STOREFRONT}/products/${hit.handle}.js`, { timeout: 6000 });
+    return r.data ? volumeRow(r.data, vol) : null;
 }
 
 // Volumes of one series the customer already has: every order-line SKU with the
@@ -1544,10 +1558,10 @@ async function referralClaimHandler(req, res) {
     let ledger = null, entry = null;
     const t0 = Date.now(), tm = {};
     try {
-        const [led, contract, fam] = await Promise.all([
+        const [led, contract, first] = await Promise.all([
             readJsonMetafield(cid, REFERRALS_METAFIELD),
             getContractForCustomer(cid),
-            seriesFamily(series),
+            findVolume(series, 1),          // Vol. 1 is the answer for "Past box" and the SKU family for "Continue"
         ]);
         tm.reads = Date.now() - t0;
         ledger = led;
@@ -1556,21 +1570,17 @@ async function referralClaimHandler(req, res) {
         if (!entry) return res.status(403).json({ error: "Nothing to claim right now." });
         if (!contract) return res.status(403).json({ error: "Your subscription needs to be active to claim \u2014 resume it first and come back." });
 
-        const [owned, onBox] = await Promise.all([
-            mCont ? ownedVolumes(cid, fam.seriesKey) : Promise.resolve(new Set()),
-            contractSkus(contract.id),
-        ]);
-        tm.owned = Date.now() - t0;
-        let target = null, reason = null;
-        if (mPast) {
-            target = fam.vols[1] || null;
-            reason = target ? null : "no Vol. 1 listing found";
-        } else {
+        // Resolve the target while the contract's SKUs load.
+        const resolve = (async () => {
+            if (mPast) return { target: first, reason: first ? null : "no Vol. 1 listing found" };
+            const owned = await ownedVolumes(cid, first ? first.seriesKey : null);
             const maxOwned = owned.size ? Math.max.apply(null, Array.from(owned)) : 1;
             const want = maxOwned + 1;
-            target = fam.vols[want] || null;
-            reason = target ? null : `Vol. ${want} not listed (owns up to ${maxOwned})`;
-        }
+            const target = await findVolume(series, want);
+            return { target, reason: target ? null : `Vol. ${want} not listed (owns up to ${maxOwned})` };
+        })();
+        const [{ target, reason }, onBox] = await Promise.all([resolve, contractSkus(contract.id)]);
+        tm.resolved = Date.now() - t0;
         const stamp = new Date().toISOString();
         if (!target) {
             Object.assign(entry, { status: "PICKED_MANUAL", pick, note, claimed_at: stamp, manual_reason: reason, contract: contract.id });
