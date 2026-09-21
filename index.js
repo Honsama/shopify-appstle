@@ -314,6 +314,58 @@ app.post("/api/appstle/add-line-item", async (req, res) => {
     }
 });
 
+// POST api Update ONE subscription line's base price (bearer-gated admin route).
+// Appstle: PUT subscription-contracts-update-line-item-price — "future orders only",
+// 422 when the new price equals the current base price. Added 2026-09-21 for the
+// grandfathered-contract shipping fix (the free-shipping migration zeroed the delivery
+// profile, and Appstle re-rates shipping from that profile at every renewal, so
+// contracts still on the old box price billed $5 short). Upstream status is passed
+// through so the caller can tell a 422 no-op from a real failure.
+app.post("/api/appstle/update-line-price", async (req, res) => {
+    const { contractId, lineId, basePrice } = req.body || {};
+    const price = Number(basePrice);
+    if (!contractId || !lineId || !(price > 0)) {
+        return res.status(400).json({ error: "Missing required parameters (contractId, lineId, basePrice > 0)." });
+    }
+    try {
+        const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-line-item-price?contractId=${encodeURIComponent(contractId)}&lineId=${encodeURIComponent(lineId)}&basePrice=${encodeURIComponent(price.toFixed(2))}`;
+        const response = await axios.put(url, {}, {
+            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
+        });
+        res.status(200).json(response.data);
+    } catch (error) {
+        console.error("Error updating line price:", error.response?.data || error.message);
+        res.status(error.response?.status || 500).json({
+            error: "Failed to update line price.",
+            details: error.response?.data || error.message,
+        });
+    }
+});
+
+// POST api Update a subscription contract's delivery (shipping) price (bearer-gated).
+// Appstle: PUT subscription-contracts-update-delivery-price — a manual price that
+// persists across renewals until changed. Same origin as the route above.
+app.post("/api/appstle/update-delivery-price", async (req, res) => {
+    const { contractId, deliveryPrice } = req.body || {};
+    const price = Number(deliveryPrice);
+    if (!contractId || !(price >= 0)) {
+        return res.status(400).json({ error: "Missing required parameters (contractId, deliveryPrice >= 0)." });
+    }
+    try {
+        const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-delivery-price?contractId=${encodeURIComponent(contractId)}&deliveryPrice=${encodeURIComponent(price.toFixed(2))}`;
+        const response = await axios.put(url, {}, {
+            headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
+        });
+        res.status(200).json(response.data);
+    } catch (error) {
+        console.error("Error updating delivery price:", error.response?.data || error.message);
+        res.status(error.response?.status || 500).json({
+            error: "Failed to update delivery price.",
+            details: error.response?.data || error.message,
+        });
+    }
+});
+
 // ✅ POST api Get subscription contract details & products
 app.post("/api/appstle/contract-details", async (req, res) => {
     const { subscriptionContractId } = req.body;
