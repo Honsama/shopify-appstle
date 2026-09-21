@@ -1497,7 +1497,9 @@ async function ownedVolumes(customerId, seriesKey) {
         after = orders.pageInfo.endCursor;
     }
     try {
-        const swaps = await readFollowing(customerId, BOX_SWAPS_METAFIELD); // list of "YYYY-MM:OUT>IN"
+        // readFollowing returns { keys, digest }; the keys are "YYYY-MM:OUT>IN" (the
+        // first cut called .forEach on the wrapper and silently skipped every swap).
+        const swaps = (await readFollowing(customerId, BOX_SWAPS_METAFIELD)).keys || [];
         swaps.forEach((s) => { const inSku = String(s).split(">")[1]; if (inSku) take(inSku); });
     } catch (e) { /* best effort */ }
     return owned;
@@ -1529,22 +1531,41 @@ async function referralClaimHandler(req, res) {
         return res.status(429).json({ error: "Hang on \u2014 your last claim is still being processed." });
     }
     claimLocks.set(cid, now);
+    // THE PROXY HAS A ~5 SECOND BUDGET. Found live on 2026-09-21 with the test
+    // account: the first cut ran six upstream calls one after another (ledger,
+    // contract, series, contract SKUs, CLAIMING write, Appstle PUT, CLAIMED
+    // write) and Shopify's app proxy gave up at 4.8 s every time with its own
+    // themed HTML 500 - the handler never got to answer, and the ledger never
+    // moved. So: every read that does not depend on another runs in parallel,
+    // the answer goes out the moment Appstle has accepted the line, and the
+    // CLAIMED stamp is written after the response. If that last write is ever
+    // lost, the entry stays CLAIMING - the page already shows CLAIMING as "in
+    // your next box", it is not re-claimable, and the 23rd run flags it CHECK.
     let ledger = null, entry = null;
+    const t0 = Date.now(), tm = {};
     try {
-        ledger = await readJsonMetafield(cid, REFERRALS_METAFIELD);
+        const [led, contract, fam] = await Promise.all([
+            readJsonMetafield(cid, REFERRALS_METAFIELD),
+            getContractForCustomer(cid),
+            seriesFamily(series),
+        ]);
+        tm.reads = Date.now() - t0;
+        ledger = led;
         const entries = (ledger && Array.isArray(ledger.referrals)) ? ledger.referrals : [];
         entry = entries.find((e) => e && e.status === "EARNED" && !e.claimed_at) || null;
-        if (!entry) return res.status(403).json({ error: "No book to claim right now." });
-        const contract = await getContractForCustomer(cid);
+        if (!entry) return res.status(403).json({ error: "Nothing to claim right now." });
         if (!contract) return res.status(403).json({ error: "Your subscription needs to be active to claim \u2014 resume it first and come back." });
 
-        const fam = await seriesFamily(series);
+        const [owned, onBox] = await Promise.all([
+            mCont ? ownedVolumes(cid, fam.seriesKey) : Promise.resolve(new Set()),
+            contractSkus(contract.id),
+        ]);
+        tm.owned = Date.now() - t0;
         let target = null, reason = null;
         if (mPast) {
             target = fam.vols[1] || null;
             reason = target ? null : "no Vol. 1 listing found";
         } else {
-            const owned = await ownedVolumes(cid, fam.seriesKey);
             const maxOwned = owned.size ? Math.max.apply(null, Array.from(owned)) : 1;
             const want = maxOwned + 1;
             target = fam.vols[want] || null;
@@ -1556,13 +1577,13 @@ async function referralClaimHandler(req, res) {
             await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
             return res.status(200).json({ ok: true, manual: true, message: "Got it \u2014 that one needs a hand from us. We\u2019ll add it and email you." });
         }
-        const onBox = await contractSkus(contract.id);
         if (onBox.indexOf(target.sku) !== -1) {
             return res.status(409).json({ error: `${target.title} is already in your next box \u2014 pick something else.` });
         }
         // Stamp CLAIMING first so a retry can't add a second line if we die mid-way.
         Object.assign(entry, { status: "CLAIMING", pick, note, claimed_at: stamp, pick_title: target.title, pick_sku: target.sku, pick_variant: target.variantId, contract: contract.id, price: REFERRAL_PRICE });
         await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
+        tm.claiming = Date.now() - t0;
         try {
             const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-add-line-item?contractId=${contract.id}&quantity=1&variantId=${target.variantId}&price=${REFERRAL_PRICE}&isOneTimeProduct=true`;
             await axios.put(url, {}, { headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" } });
@@ -1572,12 +1593,20 @@ async function referralClaimHandler(req, res) {
             await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
             throw upstream;
         }
-        entry.status = "CLAIMED";
-        await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger); // if THIS fails the entry stays CLAIMING (flagged on the 23rd), never re-claimable
+        tm.appstle = Date.now() - t0;
+        // Answer now - the line is on the contract. The CLAIMED stamp follows.
         res.status(200).json({ ok: true, title: target.title, sku: target.sku });
+        entry.status = "CLAIMED";
+        try {
+            await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
+            tm.claimed = Date.now() - t0;
+        } catch (late) {
+            console.error("proxy/referral-claim: CLAIMED stamp lost (entry stays CLAIMING, 23rd run flags it):", late.message);
+        }
+        console.log("proxy/referral-claim ok", cid, target.sku, JSON.stringify(tm));
     } catch (error) {
-        console.error("proxy/referral-claim error:", error.response?.data || error.message);
-        res.status(502).json({ error: "Couldn\u2019t add the book just now. Try again in a minute." });
+        console.error("proxy/referral-claim error:", error.response?.data || error.message, JSON.stringify(tm));
+        if (!res.headersSent) res.status(502).json({ error: "Couldn\u2019t add the manga just now. Try again in a minute." });
     } finally {
         claimLocks.delete(cid);
     }
