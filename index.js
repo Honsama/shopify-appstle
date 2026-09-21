@@ -1605,8 +1605,13 @@ async function referralClaimHandler(req, res) {
         }
         console.log("proxy/referral-claim ok", cid, target.sku, JSON.stringify(tm));
     } catch (error) {
+        const detail = String(error.response?.data?.message || error.response?.data?.errors?.[0]?.message || (typeof error.response?.data === "string" ? error.response.data : "") || error.message || "unknown").slice(0, 300);
         console.error("proxy/referral-claim error:", error.response?.data || error.message, JSON.stringify(tm));
-        if (!res.headersSent) res.status(502).json({ error: "Couldn\u2019t add the manga just now. Try again in a minute." });
+        // 200 on purpose: Shopify's app proxy replaces any 5xx from the app with its own
+        // themed HTML error page (seen live 2026-09-21), so a 502 here reaches the picker
+        // as HTML and the customer only ever sees the generic notice. ok:false carries the
+        // message through; `detail` is the upstream's own words for the support inbox.
+        if (!res.headersSent) res.status(200).json({ ok: false, error: "Couldn\u2019t add the manga just now. Try again in a minute.", detail, step: tm, build: "2026-09-21b" });
     } finally {
         claimLocks.delete(cid);
     }
