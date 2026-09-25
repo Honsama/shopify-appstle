@@ -1,6 +1,11 @@
 /*
- * Honsama Shelf Digest — Klaviyo sender
+ * Honsama Shelf Digest — Klaviyo sender  (DORMANT since 2026-09-24)
  * -------------------------------------
+ * Superseded by send-resend.js (direct send, $0, Agent Org rule 9). Kept only
+ * as the fallback if the Resend lane is ever retired. NOTE: email-template.html
+ * was retagged for the local renderer (event.* / person.* prefixes dropped,
+ * {% unsubscribe_link %} replaced) — reviving this needs those put back.
+ *
  * Reads digest/digests.json (from generate.js) and pushes one "Shelf Digest"
  * event per customer to Klaviyo. A Klaviyo flow triggered on that metric
  * sends the email using the event properties (see email-template.html).

@@ -1897,6 +1897,103 @@ app.post("/api/appstle/box-remove", verifyAppProxy, requireAppstleKey, boxRemove
 app.post("/api/appstle/box-skip", verifyAppProxy, requireAppstleKey, boxSkipHandler);
 app.post("/api/appstle/box-discount", verifyAppProxy, requireAppstleKey, boxDiscountHandler);
 
+// ============================================================================
+// 📧 Shelf Digest — unsubscribe (public, self-authenticating)
+// ----------------------------------------------------------------------------
+// Every digest email (digest/send-resend.js) carries
+//   https://<this app>/api/digest/unsubscribe?c=<customerId>&t=<hmac>
+// in the footer and in the List-Unsubscribe header. The reader is NOT logged
+// in and the link is NOT an App Proxy request, so this lives outside both the
+// /proxy signature gate and the /api/appstle bearer gate (it is under /api so
+// vercel.json routes it). Authority is the HMAC over the customer id, signed
+// with DIGEST_UNSUB_SECRET — the same value the sender used (digest/unsub-token.js).
+//
+//   GET  without ?confirm=1  → a one-line page with one button (so link
+//                              scanners that prefetch URLs cannot unsubscribe
+//                              anyone; the button is a plain link, no JS)
+//   GET  with ?confirm=1     → flips consent, confirmation page
+//   POST                     → flips consent (RFC 8058 one-click: Gmail's
+//                              "Unsubscribe" button POSTs List-Unsubscribe=One-Click)
+//
+// The flip is Shopify's own marketing consent (customerEmailMarketingConsentUpdate
+// → UNSUBSCRIBED), so Shopify stays the single source of truth: generate.js
+// filters on SUBSCRIBED next month, and Shopify Email honours it too. The box
+// subscription itself is untouched — the page says so.
+// ============================================================================
+const digestUnsub = require("./digest/unsub-token");
+const DIGEST_UNSUB_SECRET = process.env.DIGEST_UNSUB_SECRET;
+
+function digestPage(title, line, button) {
+    return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + title + " · Honsama</title></head>" +
+        "<body style=\"margin:0;background:#fdf2e2;font-family:Arial,Helvetica,sans-serif;color:#35221b;\">" +
+        "<div style=\"max-width:460px;margin:60px auto;padding:0 20px;text-align:center;\">" +
+        "<div style=\"font-family:Georgia,serif;font-size:26px;font-weight:bold;color:#821e1d;letter-spacing:1px;margin-bottom:22px;\">HONSAMA</div>" +
+        "<div style=\"background:#fffdf8;border:1px solid #e8d5b5;border-radius:14px;padding:26px 22px;\">" +
+        "<div style=\"font-size:17px;font-weight:bold;margin-bottom:10px;\">" + title + "</div>" +
+        "<div style=\"font-size:14px;line-height:1.55;color:#5a4238;\">" + line + "</div>" +
+        (button ? "<a href=\"" + button.href + "\" style=\"display:inline-block;margin-top:18px;background:#821e1d;color:#fff;font-weight:bold;text-decoration:none;padding:12px 28px;border-radius:10px;font-size:14px;\">" + button.label + "</a>" : "") +
+        "</div></div></body></html>";
+}
+
+function digestUnsubAuth(req, res) {
+    if (!DIGEST_UNSUB_SECRET) {
+        res.status(503).send(digestPage("Unsubscribe is not set up yet", "Please email <a href=\"mailto:support@honsama.com\" style=\"color:#821e1d;\">support@honsama.com</a> and we will remove you by hand."));
+        return null;
+    }
+    const c = String(req.query.c || "").trim();
+    const t = String(req.query.t || "").trim();
+    if (!digestUnsub.verify(c, t, DIGEST_UNSUB_SECRET)) {
+        res.status(400).send(digestPage("This link isn't valid", "It may have been cut short by your mail app. Reply to the email or write to <a href=\"mailto:support@honsama.com\" style=\"color:#821e1d;\">support@honsama.com</a> and we will unsubscribe you by hand."));
+        return null;
+    }
+    return c;
+}
+
+async function digestUnsubFlip(customerId) {
+    if (!ADMIN_API_TOKEN) throw new Error("ADMIN_API_TOKEN not set");
+    const data = await adminGraphql(
+        `mutation DigestUnsub($input: CustomerEmailMarketingConsentUpdateInput!) {
+            customerEmailMarketingConsentUpdate(input: $input) {
+                customer { id emailMarketingConsent { marketingState } }
+                userErrors { field message }
+            }
+        }`,
+        { input: {
+            customerId: `gid://shopify/Customer/${customerId}`,
+            emailMarketingConsent: { marketingState: "UNSUBSCRIBED", marketingOptInLevel: "SINGLE_OPT_IN", consentUpdatedAt: new Date().toISOString() },
+        } }
+    );
+    const errs = data?.customerEmailMarketingConsentUpdate?.userErrors || [];
+    if (errs.length) throw new Error(JSON.stringify(errs));
+    return data?.customerEmailMarketingConsentUpdate?.customer?.emailMarketingConsent?.marketingState;
+}
+
+async function digestUnsubDo(customerId, res) {
+    try {
+        await digestUnsubFlip(customerId);
+        console.log(`digest-unsubscribe: customer ${customerId} -> UNSUBSCRIBED`);
+        res.status(200).send(digestPage("You're unsubscribed", "No more Shelf Digest or other Honsama emails to this address. Your Monthly Manga Box itself is not affected — manage that from your account.", { href: "https://honsama.com/account", label: "Go to my account" }));
+    } catch (e) {
+        console.error(`digest-unsubscribe: customer ${customerId} failed: ${e.message}`);
+        res.status(500).send(digestPage("Something went wrong", "We couldn't save that just now. Please email <a href=\"mailto:support@honsama.com\" style=\"color:#821e1d;\">support@honsama.com</a> and we will unsubscribe you by hand today."));
+    }
+}
+
+app.get("/api/digest/unsubscribe", async (req, res) => {
+    const customerId = digestUnsubAuth(req, res);
+    if (!customerId) return;
+    if (String(req.query.confirm) !== "1") {
+        const href = `/api/digest/unsubscribe?c=${encodeURIComponent(customerId)}&t=${encodeURIComponent(String(req.query.t))}&confirm=1`;
+        return res.status(200).send(digestPage("Unsubscribe from Honsama emails?", "One click and you're out. Your Monthly Manga Box keeps shipping either way.", { href, label: "Unsubscribe" }));
+    }
+    await digestUnsubDo(customerId, res);
+});
+app.post("/api/digest/unsubscribe", async (req, res) => {
+    const customerId = digestUnsubAuth(req, res);
+    if (!customerId) return;
+    await digestUnsubDo(customerId, res);
+});
+
 // ✅ Error Handling for Undefined Routes
 app.use((req, res) => {
     res.status(404).send("404: NOT_FOUND");

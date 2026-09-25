@@ -13,3 +13,9 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# Shelf Digest — subscriber PII + send log, never commit
+digest/digests.json
+digest/send-state.json
+digest/samples/
+digest/box-history.json

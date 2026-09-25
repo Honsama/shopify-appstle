@@ -152,7 +152,7 @@ Tier 3 is polish.
   > Read `HonsamaOps/Honsama Email Automation/resend_digest/README.md` and
   > `digest/README.md`. Build the Resend lane: `digest/send-resend.js` (dry run
   > default, `--send`, `--limit 100`, resumable state file), the SUBSCRIBED
-  > consent filter in `generate.js`, and the signed `/proxy/digest-unsubscribe`
+  > consent filter in `generate.js`, and the signed `/api/digest/unsubscribe`
   > route in `index.js` that flips Shopify consent. Then walk me through the
   > self-send and 5-person canary. The monthly send stays founder-run until
   > the Dec 16 run clears the 3-runs gate.

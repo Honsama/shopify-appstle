@@ -1,11 +1,14 @@
-<!-- Honsama Shelf Digest — Klaviyo flow email template.
-     Paste into a Klaviyo flow email (Text/HTML source editor), triggered by
-     the "Shelf Digest" metric. Uses event properties from send-klaviyo.js:
-       event.new_releases[] {series, volume, title, url, image, price, reason}
-       event.behind[]       {series, owned, total, behind, pct, favorite, cover, url}
-       event.stats          {series, volumes, from_boxes, up_to_date, behind_total}
-     Suggested subject:  Your shelf grew this month, {{ person.first_name|default:'reader' }} 📚
-     Preview text:       New volumes for your series + what your box added
+<!-- Honsama Shelf Digest — email template (rendered per subscriber by digest/send-resend.js).
+     Django-style tags (double-brace variables with an optional default filter; if/endif; for/endfor) —
+     see the renderer in send-resend.js. This comment must not contain literal tags: it is rendered too.
+     Context (from digests.json + the sender):
+       first_name            customer first name ('' → 'reader')
+       new_releases[]        {series, volume, title, url, image, price, reason}
+       behind[]              {series, owned, total, behind, pct, favorite, cover, url}
+       stats                 {series, volumes, from_boxes, up_to_date, behind_total}
+       unsubscribe_url       signed link → box app /api/digest/unsubscribe (flips Shopify consent)
+       postal_address        DIGEST_POSTAL_ADDRESS (CAN-SPAM footer)
+     Subject (sender):  Your shelf grew this month, <first name> 📚
 -->
 <div style="margin:0;padding:0;background-color:#fdf2e2;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf2e2;">
@@ -22,21 +25,21 @@
       <tr><td style="padding:18px 0 0;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:14px;">
           <tr><td style="padding:20px 22px 14px;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#35221b;line-height:1.5;">
-            Hey {{ person.first_name|default:'reader' }} — here's what happened on your shelf.
+            Hey {{ first_name|default:'reader' }} — here's what happened on your shelf.
           </td></tr>
           <tr><td style="padding:0 22px 20px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
               <tr>
                 <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
-                  <div style="font-size:24px;font-weight:bold;color:#35221b;">{{ event.stats.volumes }}</div>
+                  <div style="font-size:24px;font-weight:bold;color:#35221b;">{{ stats.volumes }}</div>
                   <div style="font-size:11px;color:#8a6a55;">volumes collected</div>
                 </td>
                 <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
-                  <div style="font-size:24px;font-weight:bold;color:#821e1d;">{{ event.stats.from_boxes }}</div>
+                  <div style="font-size:24px;font-weight:bold;color:#821e1d;">{{ stats.from_boxes }}</div>
                   <div style="font-size:11px;color:#8a6a55;">from your boxes 📦</div>
                 </td>
                 <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
-                  <div style="font-size:24px;font-weight:bold;color:#185e13;">{{ event.stats.up_to_date }}</div>
+                  <div style="font-size:24px;font-weight:bold;color:#185e13;">{{ stats.up_to_date }}</div>
                   <div style="font-size:11px;color:#8a6a55;">series up to date</div>
                 </td>
               </tr>
@@ -45,12 +48,12 @@
         </table>
       </td></tr>
 
-      {% if event.new_releases %}
+      {% if new_releases %}
       <!-- New releases for your series -->
       <tr><td style="padding:22px 2px 8px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;letter-spacing:1px;color:#dd1d1d;">
         ★ NEW THIS MONTH — FOR YOUR SERIES
       </td></tr>
-      {% for item in event.new_releases %}
+      {% for item in new_releases %}
       <tr><td style="padding:0 0 10px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:12px;">
           <tr>
@@ -70,12 +73,12 @@
       {% endfor %}
       {% endif %}
 
-      {% if event.behind %}
+      {% if behind %}
       <!-- Catch up -->
       <tr><td style="padding:16px 2px 8px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;letter-spacing:1px;color:#dd1d1d;">
         ↗ CATCH UP ON YOUR SHELF
       </td></tr>
-      {% for s in event.behind %}
+      {% for s in behind %}
       <tr><td style="padding:0 0 10px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:12px;">
           <tr>
@@ -118,7 +121,8 @@
       <tr><td align="center" style="padding:26px 20px 0;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#b09a88;line-height:1.6;">
         Honsama · Newly-released manga, monthly<br>
         You're receiving this because you're a Monthly Manga Box subscriber.<br>
-        {% unsubscribe_link %}
+        <a href="{{ unsubscribe_url }}" style="color:#b09a88;text-decoration:underline;">Unsubscribe</a> from these emails — your box itself is not affected.<br>
+        {{ postal_address }}
       </td></tr>
 
     </table>

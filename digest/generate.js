@@ -6,16 +6,28 @@
  *     owns or follows, excluding volumes already owned)
  *   - Top behind-series ("catch up" — favorites first, then closest-to-done)
  *   - Shelf stats (series count, volumes, box-delivered count)
- * Writes digests.json for send-klaviyo.js.
+ * Writes digests.json for send-resend.js.
+ *
+ * Consent (Agent Org rule 9 / resend_digest README): only customers whose
+ * Shopify email marketing consent is SUBSCRIBED get a digest. Everyone else
+ * is counted and skipped - the unsubscribe link in the email writes back to
+ * this same Shopify field, so Shopify stays the single source of truth.
  *
  * Run monthly, ~the 16th (after the add-ons run, before the 21st cutoff):
  *   node digest/generate.js
  *
  * Env (.env in repo root, same loader as dev-server):
  *   ADMIN_API_TOKEN   shpat_ token of the "Honsama Library Backend" custom app
- *                     (read_orders + read_all_orders + read_customers).
- *                     Copy from Vercel env vars.
+ *                     (read_orders + read_all_orders + read_customers +
+ *                     read_metaobjects). Lives on Vercel + the rig's .env.
  *   SHOP_DOMAIN       defaults honsama.myshopify.com
+ * Fallback when ADMIN_API_TOKEN is absent (the dev PC): the ops repo's
+ *   client-credentials app. SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET are read
+ *   from .env or from CREDENTIALS_ENV (default: HonsamaOps\Honsama Email
+ *   Automation\honsama_automation\credentials.env) and exchanged for a 24 h
+ *   token. That app cannot read metaobjects, so box history then comes from
+ *   digest/box-history.json (a dated snapshot - refresh it after each add-ons
+ *   run if you generate from here).
  * Optional:
  *   DIGEST_WINDOW_DAYS   how far back "new this month" looks (default 32)
  *   SUBSCRIBER_WINDOW    days of box orders that count as "active" (default 45)
@@ -36,8 +48,32 @@ try {
 } catch (e) { /* no .env */ }
 
 const SHOP_DOMAIN = process.env.SHOP_DOMAIN || "honsama.myshopify.com";
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
+let ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const API_VERSION = "2025-10";
+const CREDENTIALS_ENV = process.env.CREDENTIALS_ENV ||
+  "C:\\Users\\doric\\HonsamaOps\\Honsama Email Automation\\honsama_automation\\credentials.env";
+const BOX_HISTORY_PATH = process.env.BOX_HISTORY_PATH || path.join(__dirname, "box-history.json");
+
+// No ADMIN_API_TOKEN -> mint a short-lived one from the ops client-credentials
+// app (same grant the milestone / KPI scripts use). Returns a label for the log.
+async function resolveAdminToken() {
+  if (ADMIN_API_TOKEN) return "ADMIN_API_TOKEN";
+  const creds = {};
+  const fromEnv = (k) => process.env[k];
+  try {
+    fs.readFileSync(CREDENTIALS_ENV, "utf8").split("\n").forEach((line) => {
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+      if (m) creds[m[1]] = m[2].replace(/^["']|["']$/g, "");
+    });
+  } catch (e) { /* no credentials.env */ }
+  const id = fromEnv("SHOPIFY_CLIENT_ID") || creds.SHOPIFY_CLIENT_ID;
+  const secret = fromEnv("SHOPIFY_CLIENT_SECRET") || creds.SHOPIFY_CLIENT_SECRET;
+  if (!id || !secret) return null;
+  const r = await axios.post(`https://${SHOP_DOMAIN}/admin/oauth/access_token`,
+    { client_id: id, client_secret: secret, grant_type: "client_credentials" });
+  ADMIN_API_TOKEN = r.data.access_token;
+  return `client credentials (scopes: ${r.data.scope})`;
+}
 const WINDOW_DAYS = parseInt(process.env.DIGEST_WINDOW_DAYS || "32", 10);
 const SUBSCRIBER_WINDOW = parseInt(process.env.SUBSCRIBER_WINDOW || "45", 10);
 
@@ -87,7 +123,7 @@ async function fetchSubscribers() {
         orders(first: 100, query: $q, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
-            customer { id email firstName }
+            customer { id email firstName emailMarketingConsent { marketingState } }
             lineItems(first: 20) { nodes { product { id } } }
           }
         }
@@ -98,12 +134,19 @@ async function fetchSubscribers() {
     orders.nodes.forEach((o) => {
       if (!o.customer || !o.customer.email) return;
       const hasBox = (o.lineItems?.nodes || []).some((li) => li.product?.id?.endsWith(`/${BOX_PRODUCT_ID}`));
-      if (hasBox) subs.set(o.customer.id, { id: o.customer.id, email: o.customer.email, firstName: o.customer.firstName || "" });
+      if (hasBox) subs.set(o.customer.id, {
+        id: o.customer.id, email: o.customer.email, firstName: o.customer.firstName || "",
+        consent: o.customer.emailMarketingConsent?.marketingState || "UNKNOWN",
+      });
     });
     if (!orders.pageInfo.hasNextPage) break;
     after = orders.pageInfo.endCursor;
   }
-  return Array.from(subs.values());
+  const all = Array.from(subs.values());
+  const subscribed = all.filter((s) => s.consent === "SUBSCRIBED");
+  const skipped = {};
+  all.filter((s) => s.consent !== "SUBSCRIBED").forEach((s) => { skipped[s.consent] = (skipped[s.consent] || 0) + 1; });
+  return { subscribers: subscribed, notSubscribed: all.length - subscribed.length, skippedByState: skipped };
 }
 
 // Full order history for one customer -> { skus[], boxMonths[], boxMonths2[] }
@@ -159,9 +202,23 @@ async function fetchCustomerLists(customerId) {
 }
 
 // box_month metaobjects -> { "YYYY-MM": { skus:[], skus2:[] } }
+// Falls back to digest/box-history.json when the token cannot read metaobjects.
 async function fetchBoxHistory() {
-  const data = await adminGraphql(
-    `query Boxes { metaobjects(type: "box_month", first: 100) { nodes { fields { key value } } } }`, {});
+  let data;
+  try {
+    data = await adminGraphql(
+      `query Boxes { metaobjects(type: "box_month", first: 100) { nodes { fields { key value } } } }`, {});
+  } catch (e) {
+    if (!/ACCESS_DENIED|Access denied/.test(e.message)) throw e;
+    if (!fs.existsSync(BOX_HISTORY_PATH)) {
+      throw new Error("token cannot read metaobjects and digest/box-history.json is missing - box credit impossible; run from the rig or refresh the snapshot");
+    }
+    const snap = JSON.parse(fs.readFileSync(BOX_HISTORY_PATH, "utf8"));
+    delete snap._note;
+    const age = Math.round((Date.now() - fs.statSync(BOX_HISTORY_PATH).mtimeMs) / 864e5);
+    console.log(`WARNING: token cannot read box_month metaobjects - using digest/box-history.json snapshot (${Object.keys(snap).length} months, ${age} day(s) old). Refresh it after each add-ons run.`);
+    return snap;
+  }
   const hist = {};
   (data?.metaobjects?.nodes || []).forEach((n) => {
     const f = {}; n.fields.forEach((x) => { f[x.key] = x.value; });
@@ -287,6 +344,7 @@ function buildDigest(customer, ownedData, lists, boxHistory, newReleases) {
   const upToDate = collection.filter((s) => s.upToDate).length;
 
   return {
+    customer_id: String(customer.id).split("/").pop(), // numeric id -> signed unsubscribe link
     email: customer.email,
     first_name: customer.firstName || "",
     new_releases: newForYou,
@@ -304,15 +362,22 @@ function buildDigest(customer, ownedData, lists, boxHistory, newReleases) {
 // ---- main -----------------------------------------------------------------
 
 async function main() {
-  if (!ADMIN_API_TOKEN) {
-    console.error("ADMIN_API_TOKEN missing — copy it from Vercel env into shopify-appstle/.env");
+  const tokenSource = await resolveAdminToken();
+  if (!tokenSource) {
+    console.error("No Admin API access: set ADMIN_API_TOKEN in shopify-appstle/.env (rig) or make SHOPIFY_CLIENT_ID/SECRET reachable (dev PC).");
     process.exit(1);
   }
+  console.log(`Admin API via ${tokenSource}`);
   console.log("Fetching box history, new releases, subscribers...");
-  const [boxHistory, newReleases, subscribers] = await Promise.all([
+  const [boxHistory, newReleases, subsResult] = await Promise.all([
     fetchBoxHistory(), fetchNewReleases(), fetchSubscribers(),
   ]);
-  console.log(`box months: ${Object.keys(boxHistory).length}, new releases: ${newReleases.length}, subscribers: ${subscribers.length}`);
+  const subscribers = subsResult.subscribers;
+  console.log(`box months: ${Object.keys(boxHistory).length}, new releases: ${newReleases.length}, active subscribers with SUBSCRIBED consent: ${subscribers.length}`);
+  console.log(`consent filter skipped ${subsResult.notSubscribed} active subscriber(s)` +
+    (subsResult.notSubscribed ? ` (${Object.entries(subsResult.skippedByState).map(([k, v]) => `${k}: ${v}`).join(", ")})` : "") +
+    " - they never get a digest; Shopify consent is the only source of truth.");
+  if (!newReleases.length) console.log("WARNING: 0 new releases - the add-ons run hasn't happened yet. Do not send this digest.");
 
   const digests = [];
   for (const sub of subscribers) {
