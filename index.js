@@ -1479,25 +1479,53 @@ var BOX_SWAPS_METAFIELD = { namespace: "honsama", key: "box_swaps" };
 var REFERRAL_PRICE = "0.01";
 var claimLocks = new Map(); // customerId -> ts (one claim in flight per customer)
 
+// Returns { ledger, digest }: the parsed JSON (null when absent or unreadable) and
+// Shopify's compareDigest for it, so the write can be made conditional.
 async function readJsonMetafield(customerId, mf) {
     const data = await adminGraphql(
-        `query MF($id: ID!) { customer(id: $id) { metafield(namespace: "${mf.namespace}", key: "${mf.key}") { value } } }`,
+        `query MF($id: ID!) { customer(id: $id) { metafield(namespace: "${mf.namespace}", key: "${mf.key}") { value compareDigest } } }`,
         { id: `gid://shopify/Customer/${customerId}` }
     );
-    const raw = data?.customer?.metafield?.value;
-    if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) { return null; }
+    const field = data?.customer?.metafield;
+    let ledger = null;
+    if (field?.value) { try { ledger = JSON.parse(field.value); } catch (e) { ledger = null; } }
+    return { ledger, digest: field?.compareDigest || null };
 }
 
-async function writeJsonMetafield(customerId, mf, obj) {
+// Returns the new compareDigest, or false when the metafield changed since `digest`
+// was read (STALE_OBJECT). Any other userError throws.
+async function writeJsonMetafield(customerId, mf, obj, digest) {
+    const input = { ownerId: `gid://shopify/Customer/${customerId}`, namespace: mf.namespace, key: mf.key, type: "json", value: JSON.stringify(obj) };
+    if (digest) input.compareDigest = digest;
     const data = await adminGraphql(
         `mutation SetJson($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) { metafields { id } userErrors { field message } }
+            metafieldsSet(metafields: $metafields) { metafields { id compareDigest } userErrors { field message code } }
         }`,
-        { metafields: [{ ownerId: `gid://shopify/Customer/${customerId}`, namespace: mf.namespace, key: mf.key, type: "json", value: JSON.stringify(obj) }] }
+        { metafields: [input] }
     );
     const errs = data?.metafieldsSet?.userErrors || [];
+    if (errs.some((e) => e.code === "STALE_OBJECT")) return false;
     if (errs.length) throw new Error(JSON.stringify(errs));
+    return data?.metafieldsSet?.metafields?.[0]?.compareDigest || null;
+}
+
+// Move ONE ledger entry to a new state, conditionally. `st` is { ledger, digest }
+// from readJsonMetafield; `find(entries)` returns the entry this transition applies
+// to, or null when it no longer applies. claimLocks only covers one warm instance -
+// a second Vercel instance, or the 23rd-run script, can read the same ledger - so
+// every write carries the compareDigest: Shopify refuses it (STALE_OBJECT) if
+// anything wrote in between, and we re-read and re-check instead of one write
+// silently wiping the other. Returns the entry, or null if it was taken.
+async function setLedgerEntry(cid, st, find, fields) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const entry = find(st.ledger && Array.isArray(st.ledger.referrals) ? st.ledger.referrals : []);
+        if (!entry) return null;
+        Object.assign(entry, fields);
+        const digest = await writeJsonMetafield(cid, REFERRALS_METAFIELD, st.ledger, st.digest);
+        if (digest !== false) { st.digest = digest; return entry; }
+        Object.assign(st, await readJsonMetafield(cid, REFERRALS_METAFIELD));
+    }
+    throw new Error("referrals ledger kept changing during the claim");
 }
 
 // One listed volume of a series -> { seriesKey, vol, variantId, sku, title }, or null.
@@ -1528,18 +1556,23 @@ function volumeRow(product, vol) {
 }
 async function findVolume(series, vol) {
     const want = new RegExp(`^${series.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+Vol\\.?\\s*0*${vol}$`, "i");
+    // The $1 add-on duplicates carry the retail title (handle "<retail>-easify", or a
+    // drifted "-vol-N" handle from the duplicate recipe) - never resolve to one.
+    const retail = (p) => p && !/-easify$/.test(String(p.handle || "")) && !(Number(p.price) <= 100);   // .js price is in cents
     // 1. the guessed handle
     try {
         const r = await axios.get(`${STOREFRONT}/products/${handleFor(`${series} Vol. ${vol}`)}.js`, { timeout: 6000, validateStatus: (s) => s === 200 });
-        if (r.data && want.test(String(r.data.title || ""))) return volumeRow(r.data, vol);
+        if (r.data && want.test(String(r.data.title || "")) && retail(r.data)) return volumeRow(r.data, vol);
     } catch (e) { /* fall through to search */ }
     // 2. predictive search, exact title match, then the product's own JSON
     const q = encodeURIComponent(`${series} Vol. ${vol}`);
     const s = await axios.get(`${STOREFRONT}/search/suggest.json?q=${q}&resources[type]=product&resources[limit]=10`, { timeout: 6000 });
-    const hit = (s.data?.resources?.results?.products || []).find((p) => want.test(String(p.title || "")));
-    if (!hit) return null;
-    const r = await axios.get(`${STOREFRONT}/products/${hit.handle}.js`, { timeout: 6000 });
-    return r.data ? volumeRow(r.data, vol) : null;
+    const hits = (s.data?.resources?.results?.products || []).filter((p) => want.test(String(p.title || "")) && !/-easify$/.test(String(p.handle || "")));
+    for (const hit of hits.slice(0, 2)) {
+        const r = await axios.get(`${STOREFRONT}/products/${hit.handle}.js`, { timeout: 6000 });
+        if (r.data && retail(r.data)) return volumeRow(r.data, vol);
+    }
+    return null;
 }
 
 // Volumes of one series the customer already has: every order-line SKU with the
@@ -1549,6 +1582,9 @@ async function ownedVolumes(customerId, seriesKey) {
     if (!seriesKey) return owned;
     const prefix = seriesKey + "-";
     const take = (sku) => { const m = /^(.+)-(\d{2,})$/.exec(String(sku || "")); if (m && m[1] === seriesKey) owned.add(parseInt(m[2], 10)); };
+    // Started now so they run alongside the order pages. owned_upto = My Library's
+    // "I own up to Vol. N" - /owned and the picker's tile count it, so this must too.
+    const marks = Promise.allSettled([readFollowing(customerId, BOX_SWAPS_METAFIELD), readFollowing(customerId, OWNED_METAFIELD)]);
     let after = null;
     for (let page = 0; page < 30; page++) {
         const data = await adminGraphql(
@@ -1562,12 +1598,10 @@ async function ownedVolumes(customerId, seriesKey) {
         if (!orders.pageInfo.hasNextPage) break;
         after = orders.pageInfo.endCursor;
     }
-    try {
-        // readFollowing returns { keys, digest }; the keys are "YYYY-MM:OUT>IN" (the
-        // first cut called .forEach on the wrapper and silently skipped every swap).
-        const swaps = (await readFollowing(customerId, BOX_SWAPS_METAFIELD)).keys || [];
-        swaps.forEach((s) => { const inSku = String(s).split(">")[1]; if (inSku) take(inSku); });
-    } catch (e) { /* best effort */ }
+    // Best effort. readFollowing returns { keys, digest }; box_swaps keys are "YYYY-MM:OUT>IN".
+    const [swaps, declared] = await marks;
+    if (swaps.status === "fulfilled") (swaps.value.keys || []).forEach((s) => { const inSku = String(s).split(">")[1]; if (inSku) take(inSku); });
+    if (declared.status === "fulfilled") applyDeclarations([], declared.value.keys || []).forEach(take);
     return owned;
 }
 
@@ -1584,9 +1618,11 @@ async function contractSkus(contractId) {
 }
 
 async function referralClaimHandler(req, res) {
-    if (!ADMIN_API_TOKEN) return res.status(503).json({ error: "Referral claims are not configured yet." });
-    const pick = String((req.body || {}).pick || "").trim().slice(0, 200);
-    const note = String((req.body || {}).note || "").trim().slice(0, 200);
+    // Never a 5xx from here: the app proxy would swap it for its own HTML page.
+    if (!ADMIN_API_TOKEN) return res.status(200).json({ ok: false, error: "Referral claims are not configured yet." });
+    const text = (v) => (typeof v === "string" ? v : "");   // String({toString:1}) throws before the try below
+    const pick = text((req.body || {}).pick).trim().slice(0, 200);
+    const note = text((req.body || {}).note).trim().slice(0, 200);
     const mCont = pick.match(/^Continue:\s*(.+?)\s*[\u2014\u2013-]+\s*next volume$/i);
     const mPast = pick.match(/^Past box:\s*(.+?)\s*Vol\.?\s*1$/i);
     if (!mCont && !mPast) return res.status(400).json({ error: "Unrecognised pick." });
@@ -1603,31 +1639,47 @@ async function referralClaimHandler(req, res) {
     // write) and Shopify's app proxy gave up at 4.8 s every time with its own
     // themed HTML 500 - the handler never got to answer, and the ledger never
     // moved. So: every read that does not depend on another runs in parallel,
-    // the answer goes out the moment Appstle has accepted the line, and the
-    // CLAIMED stamp is written after the response. If that last write is ever
+    // and the answer goes out once Appstle has accepted the line and CLAIMED is
+    // stamped (or straight after Appstle when time is short). If that last write is ever
     // lost, the entry stays CLAIMING - the page already shows CLAIMING as "in
     // your next box", it is not re-claimable, and the 23rd run flags it CHECK.
-    let ledger = null, entry = null;
+    let entry = null;
     const t0 = Date.now(), tm = {};
     try {
         const [led, contract, first] = await Promise.all([
             readJsonMetafield(cid, REFERRALS_METAFIELD),
             getContractForCustomer(cid),
-            findVolume(series, 1),          // Vol. 1 is the answer for "Past box" and the SKU family for "Continue"
+            // Vol. 1 is the answer for "Past box" and the SKU family for "Continue". A
+            // storefront failure is held until after the ledger check, so a customer
+            // with nothing to claim still gets the 403, not "try again".
+            findVolume(series, 1).then((v) => v, (e) => ({ failed: e })),
         ]);
         tm.reads = Date.now() - t0;
-        ledger = led;
-        const entries = (ledger && Array.isArray(ledger.referrals)) ? ledger.referrals : [];
-        entry = entries.find((e) => e && e.status === "EARNED" && !e.claimed_at) || null;
+        const st = led;                  // { ledger, digest } - setLedgerEntry keeps it current
+        const entries = (st.ledger && Array.isArray(st.ledger.referrals)) ? st.ledger.referrals : [];
+        const claimable = (e) => e && e.status === "EARNED" && !e.claimed_at;
+        entry = entries.find(claimable) || null;
+        // After a re-read, these find the SAME referral (by order) in its expected state.
+        const sameRef = (e) => !entry.order || e.order === entry.order;
+        const stillEarned = (list) => list.find((e) => claimable(e) && sameRef(e)) || null;
+        const stillClaiming = (list) => list.find((e) => e && e.status === "CLAIMING" && sameRef(e) && e.pick_sku === entry.pick_sku) || null;
+        const TAKEN = { ok: false, error: "That manga has already been claimed — refresh the page." };
         if (!entry) return res.status(403).json({ error: "Nothing to claim right now." });
         if (!contract) return res.status(403).json({ error: "Your subscription needs to be active to claim \u2014 resume it first and come back." });
+        if (first && first.failed) throw first.failed;
 
         // Resolve the target while the contract's SKUs load.
         const resolve = (async () => {
             if (mPast) return { target: first, reason: first ? null : "no Vol. 1 listing found" };
-            const owned = await ownedVolumes(cid, first ? first.seriesKey : null);
+            // Without the series' SKU family nothing they own can be counted, and the
+            // Vol. 2 default could hand them a volume already on their shelf.
+            if (!first || !first.seriesKey) return { target: null, reason: "series SKU family unknown (no Vol. 1 listing)" };
+            const owned = await ownedVolumes(cid, first.seriesKey);
             const maxOwned = owned.size ? Math.max.apply(null, Array.from(owned)) : 1;
-            const want = maxOwned + 1;
+            // The picker's tile names the volume it worked out (it also credits box
+            // volumes, which this server cannot see) - honour it when higher, never lower.
+            const shown = parseInt((req.body || {}).vol, 10);
+            const want = Math.max(maxOwned + 1, shown >= 2 && shown <= OWNED_MAX_VOL ? shown : 0);
             const target = await findVolume(series, want);
             return { target, reason: target ? null : `Vol. ${want} not listed (owns up to ${maxOwned})` };
         })();
@@ -1635,35 +1687,57 @@ async function referralClaimHandler(req, res) {
         tm.resolved = Date.now() - t0;
         const stamp = new Date().toISOString();
         if (!target) {
-            Object.assign(entry, { status: "PICKED_MANUAL", pick, note, claimed_at: stamp, manual_reason: reason, contract: contract.id });
-            await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
+            if (!await setLedgerEntry(cid, st, stillEarned, { status: "PICKED_MANUAL", pick, note, claimed_at: stamp, manual_reason: reason, contract: contract.id })) return res.status(409).json(TAKEN);
             return res.status(200).json({ ok: true, manual: true, message: "Got it \u2014 that one needs a hand from us. We\u2019ll add it and email you." });
         }
         if (onBox.indexOf(target.sku) !== -1) {
             return res.status(409).json({ error: `${target.title} is already in your next box \u2014 pick something else.` });
         }
         // Stamp CLAIMING first so a retry can't add a second line if we die mid-way.
-        Object.assign(entry, { status: "CLAIMING", pick, note, claimed_at: stamp, pick_title: target.title, pick_sku: target.sku, pick_variant: target.variantId, contract: contract.id, price: REFERRAL_PRICE });
-        await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
+        // Conditional on the digest: a claim racing on another instance loses here, before Appstle.
+        entry = await setLedgerEntry(cid, st, stillEarned, { status: "CLAIMING", pick, note, claimed_at: stamp, pick_title: target.title, pick_sku: target.sku, pick_variant: target.variantId, contract: contract.id, price: REFERRAL_PRICE });
+        if (!entry) return res.status(409).json(TAKEN);
         tm.claiming = Date.now() - t0;
         try {
             const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-add-line-item?contractId=${contract.id}&quantity=1&variantId=${target.variantId}&price=${REFERRAL_PRICE}&isOneTimeProduct=true`;
             await axios.put(url, {}, { headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" } });
         } catch (upstream) {
-            // Appstle refused: hand the entry back so they can try again.
-            Object.assign(entry, { status: "EARNED", claimed_at: null, last_error: String(upstream.response?.data?.message || upstream.message || "appstle").slice(0, 200) });
-            await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
-            throw upstream;
+            // A 4xx is Appstle refusing - nothing was added, hand the entry back. Anything
+            // else (timeout, socket hang up, 5xx) is AMBIGUOUS: the line may have landed
+            // (TRANSPORT DEFAULTS, top of file). Re-opening the claim after a landed line
+            // is how one referral becomes two books, so look at the contract first; if
+            // even that fails, leave CLAIMING for the 23rd run to CHECK.
+            const code = upstream.response?.status;
+            let landed = false;
+            if (!(code >= 400 && code < 500)) {
+                try { landed = (await contractSkus(contract.id)).indexOf(target.sku) !== -1; } catch (e) { landed = null; }
+            }
+            if (landed === false) {
+                await setLedgerEntry(cid, st, stillClaiming, { status: "EARNED", claimed_at: null, last_error: String(upstream.response?.data?.message || upstream.message || "appstle").slice(0, 200) });
+            }
+            if (landed !== true) throw upstream;
+            console.warn("proxy/referral-claim: Appstle call failed but the line is on the contract - treating as added:", upstream.message);
         }
         tm.appstle = Date.now() - t0;
-        // Answer now - the line is on the contract. The CLAIMED stamp follows.
-        res.status(200).json({ ok: true, title: target.title, sku: target.sku });
-        entry.status = "CLAIMED";
-        try {
-            await writeJsonMetafield(cid, REFERRALS_METAFIELD, ledger);
-            tm.claimed = Date.now() - t0;
-        } catch (late) {
-            console.error("proxy/referral-claim: CLAIMED stamp lost (entry stays CLAIMING, 23rd run flags it):", late.message);
+        // The line is on the contract. Stamp CLAIMED BEFORE answering when the budget
+        // allows: Vercel may freeze the function once the response is out, and a write
+        // queued after it was lost live (test account, 2026-09-23 00:31Z - line on the
+        // contract, entry left CLAIMING). Past ~3.5 s the answer goes first so the proxy
+        // does not time out; a lost stamp then stays CLAIMING and the 23rd run settles it.
+        const stampClaimed = async () => {
+            try {
+                await setLedgerEntry(cid, st, stillClaiming, { status: "CLAIMED" });
+                tm.claimed = Date.now() - t0;
+            } catch (late) {
+                console.error("proxy/referral-claim: CLAIMED stamp lost (entry stays CLAIMING, 23rd run flags it):", late.message);
+            }
+        };
+        if (Date.now() - t0 < 3500) {
+            await stampClaimed();
+            res.status(200).json({ ok: true, title: target.title, sku: target.sku });
+        } else {
+            res.status(200).json({ ok: true, title: target.title, sku: target.sku });
+            await stampClaimed();
         }
         console.log("proxy/referral-claim ok", cid, target.sku, JSON.stringify(tm));
     } catch (error) {
@@ -1673,7 +1747,7 @@ async function referralClaimHandler(req, res) {
         // themed HTML error page (seen live 2026-09-21), so a 502 here reaches the picker
         // as HTML and the customer only ever sees the generic notice. ok:false carries the
         // message through; `detail` is the upstream's own words for the support inbox.
-        if (!res.headersSent) res.status(200).json({ ok: false, error: "Couldn\u2019t add the manga just now. Try again in a minute.", detail, step: tm, build: "2026-09-21b" });
+        if (!res.headersSent) res.status(200).json({ ok: false, error: "Couldn\u2019t add the manga just now. Try again in a minute.", detail, step: tm, build: "2026-09-24" });
     } finally {
         claimLocks.delete(cid);
     }
