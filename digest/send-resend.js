@@ -237,7 +237,7 @@ async function main() {
     samples.forEach((d, idx) => {
       const url = CFG.unsubSecret ? unsub.unsubscribeUrl(CFG.unsubBase, d.customer_id, CFG.unsubSecret) : `${CFG.unsubBase}/api/digest/unsubscribe?c=${d.customer_id}&t=UNSIGNED-SET-DIGEST_UNSUB_SECRET`;
       const file = path.join(SAMPLES_DIR, `sample-${idx + 1}.html`);
-      fs.writeFileSync(file, `<!-- To: ${d.email} · Subject: ${renderSubject(d)} -->\n` + renderEmail(d, url));
+      fs.writeFileSync(file, renderEmail(d, url) + `\n<!-- sample for: ${d.email} · subject: ${renderSubject(d)} -->\n`);
     });
     digests.forEach((d) => console.log(`DRY  ${d.email}: ${d.new_releases.length} new, ${d.behind.length} catch-up, ${d.stats.volumes} vols (${d.stats.from_boxes} from boxes)${state.sent[d.email] ? "  [already sent]" : ""}`));
     console.log(`\nDry run only. ${samples.length} rendered sample(s) in digest/samples/ — open them in a browser.`);
