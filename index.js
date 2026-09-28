@@ -3,6 +3,9 @@ const axios = require("axios");
 const crypto = require("crypto");
 const cors = require("cors");
 const https = require("https");
+// 2026-09-28: the light novel add-on goes onto the contract as a RECURRING line, once.
+// Decision + duplicate guard live in ln-box-add.js (tests: node ln-box-add.test.js).
+const { isLnVariant, runLnBoxAdd } = require("./ln-box-add");
 
 // ---------------------------------------------------------------------------
 // TRANSPORT DEFAULTS (2026-08-20, revised 2026-09-05)
@@ -685,7 +688,9 @@ async function boxHandler(req, res) {
 }
 
 // POST add  { variantId, quantity? } → adds a ONE-TIME item to the logged-in
-// customer's own next box. isOneTimeProduct is hardcoded true.
+// customer's own next box. isOneTimeProduct is hardcoded true for every variant
+// EXCEPT the light novel add-on (49014826991916), which goes on as a RECURRING
+// line, once — see the block inside addToBoxHandler and ln-box-add.js (2026-09-28).
 // Shopify rejects a subscription-draft commit that collided with another edit
 // on the same contract: STALE_CONTRACT, "Another operation updated the contract
 // concurrently as the commit was in progress." Appstle surfaces Shopify's own
@@ -787,6 +792,21 @@ async function contractPut(url, headers, label) {
     throw lastError;
 }
 
+// The contract's own lines, with Appstle's stringified fields parsed — the same
+// read boxHandler and contractSkus make, returned whole so a caller can look at
+// prices and attributes, not just SKUs. Used by the light novel branch below.
+async function contractDetailRows(contractId) {
+    const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contract-details?subscriptionContractId=${contractId}&page=0&size=10&sort=id,desc`;
+    const details = await axios.get(url, { headers: { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" } });
+    const rows = Array.isArray(details.data) ? details.data : [];
+    rows.forEach((item) => {
+        ["contractDetailsJSON", "orderNoteAttributes", "lastSuccessfulOrder"].forEach((f) => {
+            if (typeof item[f] === "string") { try { item[f] = JSON.parse(item[f]); } catch (e) { /* leave */ } }
+        });
+    });
+    return rows;
+}
+
 async function addToBoxHandler(req, res) {
     req._addStartedAt = Date.now();
     const rawVariant = String((req.body || {}).variantId || "");
@@ -802,9 +822,52 @@ async function addToBoxHandler(req, res) {
     try {
         const contract = await getContractForCustomer(req.customerId);
         if (!contract) return res.status(403).json({ error: "No active subscription." });
+        const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
+
+        // THE LIGHT NOVEL ADD-ON IS RECURRING, AND IT IS THE ONLY EXCEPTION (2026-09-28).
+        //
+        // Its page sells "one brand-new light novel, every month", the box page
+        // sells it as a subscription line, and the My Box drawer files it under
+        // "My Subscriptions" by product id whatever its billing type. This route
+        // added it one-time like everything else, so a subscriber who tapped
+        // "Add to my box" got one book, then nothing — confirmed on the test
+        // account in the Appstle portal ("Added as one time purchase only").
+        //
+        // What happens instead: read the contract first. A paid recurring light
+        // novel already there → 200 {already:true}, no write (200 on purpose: the
+        // page script treats any non-2xx as "Unable to add", and a duplicate is
+        // not a failure). A paid ONE-TIME light novel there (this bug's output) →
+        // remove it, then add the recurring line, so nothing stacks on the next
+        // box. A $0 line is the tenure-reward copy and does not count. Otherwise
+        // add at quantity 1 with isOneTimeProduct=false — the same call
+        // ln_reward_sync.py's restore makes, proven on a test contract 2026-09-02.
+        // Appstle marks one-time lines with the attribute
+        // `_appstle-one-time-product`; the module reads that, an isOneTimeProduct
+        // field, or an empty sellingPlanId, and treats "unknown" as recurring so
+        // nobody is ever charged for a second copy. Manga and backlist volumes
+        // (My Library catch-up, title pages, the drawer) take the one-time path
+        // below, unchanged. Writes go through contractPut, so the STALE_CONTRACT
+        // and rate-limit retries apply here too; failures fall to the catch and
+        // keep this route's 409 JSON contract.
+        if (isLnVariant(variantId)) {
+            const base = "https://subscription-admin.appstle.com/api/external/v2/";
+            const out = await runLnBoxAdd({
+                contractGet: (id) => contractDetailRows(id),
+                contractPut: (endpoint, params) => {
+                    const qs = Object.keys(params).map((k) => `${k}=${encodeURIComponent(String(params[k]))}`).join("&");
+                    return contractPut(`${base}${endpoint}?${qs}`, headers, `proxy/add-line-item light novel contract ${contract.id}`)
+                        .then((r) => r.response.data);
+                },
+                contractRemove: (id, lineId) =>
+                    contractPut(`${base}subscription-contracts-remove-line-item?contractId=${id}&lineId=${encodeURIComponent(lineId)}&removeDiscount=true`,
+                        headers, `proxy/box-add replace one-time light novel line ${lineId}`)
+                        .then((r) => r.response.data),
+                log: (m) => console.log(m),
+            }, contract.id);
+            return res.status(200).json(Object.assign({ contractId: contract.id, ms: Date.now() - req._addStartedAt }, out));
+        }
 
         const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-add-line-item?contractId=${contract.id}&quantity=${quantity}&variantId=${variantId}&isOneTimeProduct=true`;
-        const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
 
         // `attempts` and `ms` are diagnostics, not decoration. A recovered
         // write is otherwise indistinguishable from a slow one, and the only
