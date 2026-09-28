@@ -64,6 +64,13 @@ t('paid ONE-TIME line (attribute) -> replace with its lineId', () => {
   assert.strictEqual(d.lineId, 'gid://shopify/SubscriptionLine/77');
 });
 
+t('two paid ONE-TIME lines (the button pressed twice) -> replace lists both', () => {
+  const d = m.decideLnAdd(payload([boxLine, line({ lineId: 'A', customAttributes: [{ key: '_appstle-one-time-product', value: 'true' }] }),
+    line({ lineId: 'B', customAttributes: [{ key: '_appstle-one-time-product', value: 'true' }] })]));
+  assert.strictEqual(d.action, 'replace');
+  assert.deepStrictEqual(d.lineIds, ['A', 'B']);
+});
+
 t('paid ONE-TIME line (isOneTimeProduct field) -> replace', () => {
   assert.strictEqual(m.decideLnAdd(payload([boxLine, line({ isOneTimeProduct: true })])).action, 'replace');
 });
@@ -126,6 +133,14 @@ t('garbage payload -> add (nothing readable means nothing there)', () => {
   assert.deepStrictEqual(calls[1], ['remove', '123', 'L77']);
   assert.strictEqual(calls[2][0], 'put');
   n++; console.log('  ok  run: replace -> remove, then PUT');
+
+  calls.length = 0;
+  r = await m.runLnBoxAdd(deps(payload([boxLine, line({ lineId: 'A', customAttributes: [{ key: '_appstle-one-time-product', value: 'true' }] }),
+    line({ lineId: 'B', customAttributes: [{ key: '_appstle-one-time-product', value: 'true' }] })])), '123');
+  assert.strictEqual(r.replaced, true);
+  assert.deepStrictEqual(calls.slice(1, 3), [['remove', '123', 'A'], ['remove', '123', 'B']]);
+  assert.strictEqual(calls[3][0], 'put'); assert.strictEqual(calls.length, 4);
+  n++; console.log('  ok  run: two one-time copies -> both removed, then one PUT');
 
   calls.length = 0;
   await assert.rejects(m.runLnBoxAdd({ contractGet: async () => { throw new Error('STALE_CONTRACT'); }, contractPut: async () => {}, contractRemove: async () => {} }, '1'));

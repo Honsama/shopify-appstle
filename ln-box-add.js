@@ -16,8 +16,8 @@
  *   as Honsama Milestones\ln_reward_sync.py collect_lines) and returns one of:
  *     { action: 'already' }              a paid RECURRING light novel line is on the contract
  *                                        (price >= $1, or a price that cannot be read).
- *     { action: 'replace', lineId }      a paid ONE-TIME light novel line is there (the bug's
- *                                        output): remove it, then add the recurring line.
+ *     { action: 'replace', lineIds }     paid ONE-TIME light novel line(s) are there (the bug's
+ *                                        output): remove every one, then add the recurring line.
  *     { action: 'add' }                  no paid line; a $0 line (the tenure reward copy)
  *                                        does not count as a subscription.
  *   runLnBoxAdd(deps, contractId) performs it through injected calls so the logic is
@@ -155,8 +155,11 @@ function decideLnAdd(contractPayload) {
   const paid = lines.filter(l => l.price === null || l.price >= PAID_FLOOR);
   const recurring = paid.find(l => l.oneTime !== true);
   if (recurring) return { action: 'already', lineId: recurring.lineId, lines };
-  const oneTime = paid.find(l => l.oneTime === true);
-  if (oneTime) return { action: 'replace', lineId: oneTime.lineId, lines };
+  // Every paid one-time copy goes, not just the first: a subscriber who pressed the
+  // button twice under the old code has two queued, and leaving one behind would
+  // ship a second book on the next box beside the recurring one.
+  const oneTime = paid.filter(l => l.oneTime === true);
+  if (oneTime.length) return { action: 'replace', lineId: oneTime[0].lineId, lineIds: oneTime.map(l => l.lineId), lines };
   return { action: 'add', lines };
 }
 
@@ -179,7 +182,7 @@ async function runLnBoxAdd(deps, contractId) {
     return { ok: true, recurring: true, already: true };
   }
   if (decision.action === 'replace') {
-    await deps.contractRemove(contractId, decision.lineId);
+    for (const lineId of decision.lineIds) await deps.contractRemove(contractId, lineId);
   }
   const result = await deps.contractPut('subscription-contracts-add-line-item', {
     contractId, quantity: 1, variantId: LN_VARIANT_ID, isOneTimeProduct: false,
