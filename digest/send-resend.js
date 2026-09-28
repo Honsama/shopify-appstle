@@ -12,6 +12,7 @@
  *   node digest/send-resend.js --send                # send up to 100 (Resend free daily cap)
  *   node digest/send-resend.js --send --limit 50     # smaller batch
  *   node digest/send-resend.js --only me@x.com       # self-send / canary (comma-separate for several)
+ *   node digest/send-resend.js --only a@x.com --to me@y.com --send   # TEST COPY of a's digest to me (send log untouched)
  *   node digest/send-resend.js --reset-state         # forget what was sent for this digests.json
  *
  * Resumable: digest/send-state.json remembers which emails were sent for the
@@ -51,6 +52,9 @@ const RESET = argv.includes("--reset-state");
 const flagValue = (name) => { const i = argv.indexOf(name); return i !== -1 ? argv[i + 1] : undefined; };
 const LIMIT = parseInt(flagValue("--limit") || "100", 10);
 const ONLY = (flagValue("--only") || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+// --to a@b.com: deliver the selected digest(s) to this address INSTEAD of the
+// customer (test copies for inbox-placement checks). Never touches the send log.
+const TO = (flagValue("--to") || "").trim().toLowerCase();
 
 // ---- config ---------------------------------------------------------------
 const CFG = {
@@ -180,10 +184,10 @@ function loadState(digestHash) {
 function saveState(state) { fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 1)); }
 
 // ---- Resend ---------------------------------------------------------------
-async function sendOne(digest, html, unsubscribeUrl, tag) {
+async function sendOne(digest, html, unsubscribeUrl, tag, recipient) {
   const body = {
     from: CFG.from,
-    to: [digest.email],
+    to: [recipient || digest.email],
     reply_to: CFG.replyTo,
     subject: renderSubject(digest),
     html,
@@ -247,25 +251,25 @@ async function main() {
 
   if (!ok) { console.error("\nRefusing to send: fix the MISSING lines above."); process.exit(1); }
 
+  if (TO) console.log(`TEST COPY mode: delivering to ${TO} instead of the customer; the send log is not updated.`);
   let sent = 0, failed = 0, skipped = 0;
   for (const d of digests) {
-    if (state.sent[d.email]) { skipped++; continue; }
+    if (!TO && state.sent[d.email]) { skipped++; continue; }
     if (sent >= LIMIT) { console.log(`Limit ${LIMIT} reached — re-run tomorrow for the rest.`); break; }
-    const summary = `${d.email}: ${d.new_releases.length} new, ${d.behind.length} catch-up`;
+    const summary = `${d.email}${TO ? ` -> ${TO}` : ""}: ${d.new_releases.length} new, ${d.behind.length} catch-up`;
     try {
       const url = unsub.unsubscribeUrl(CFG.unsubBase, d.customer_id, CFG.unsubSecret);
-      const id = await sendOne(d, renderEmail(d, url), url, runTag);
-      state.sent[d.email] = { id, at: new Date().toISOString() };
-      delete state.failed[d.email];
+      const id = await sendOne(d, renderEmail(d, url), url, runTag, TO);
+      if (!TO) { state.sent[d.email] = { id, at: new Date().toISOString() }; delete state.failed[d.email]; }
       sent++;
       console.log(`SENT ${summary} (${id})`);
     } catch (e) {
       const status = e.response && e.response.status;
       const detail = e.response && e.response.data ? JSON.stringify(e.response.data) : e.message;
-      state.failed[d.email] = { error: detail, at: new Date().toISOString() };
+      if (!TO) state.failed[d.email] = { error: detail, at: new Date().toISOString() };
       failed++;
       console.error(`FAIL ${summary}: ${status || ""} ${detail}`);
-      saveState(state);
+      if (!TO) saveState(state);
       if (status === 429 && /daily|quota/i.test(detail)) { console.error("Daily quota hit — stop here, re-run tomorrow."); break; }
       if (status === 401 || status === 403) { console.error("Resend rejected the API key — stopping."); break; }
     }
