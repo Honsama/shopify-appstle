@@ -27,7 +27,7 @@
  * Optional:
  *   DIGEST_FROM             default: Ricky at Honsama <ricky@mail.honsama.com>
  *   DIGEST_REPLY_TO         default: support@honsama.com
- *   DIGEST_UNSUB_BASE       default: https://shopify-appstle.vercel.app
+ *   DIGEST_UNSUB_BASE       default: https://app.honsama.com (CNAME -> Vercel; the vercel.app host still works)
  *   DIGEST_SUBJECT          default: Your shelf grew this month, {{first_name}} 📚
  */
 
@@ -59,7 +59,7 @@ const CFG = {
   postal: process.env.DIGEST_POSTAL_ADDRESS,
   from: process.env.DIGEST_FROM || "Ricky at Honsama <ricky@mail.honsama.com>",
   replyTo: process.env.DIGEST_REPLY_TO || "support@honsama.com",
-  unsubBase: process.env.DIGEST_UNSUB_BASE || "https://shopify-appstle.vercel.app",
+  unsubBase: process.env.DIGEST_UNSUB_BASE || "https://app.honsama.com",
   subject: process.env.DIGEST_SUBJECT || "Your shelf grew this month, {{first_name}} 📚",
 };
 
@@ -237,7 +237,7 @@ async function main() {
     samples.forEach((d, idx) => {
       const url = CFG.unsubSecret ? unsub.unsubscribeUrl(CFG.unsubBase, d.customer_id, CFG.unsubSecret) : `${CFG.unsubBase}/api/digest/unsubscribe?c=${d.customer_id}&t=UNSIGNED-SET-DIGEST_UNSUB_SECRET`;
       const file = path.join(SAMPLES_DIR, `sample-${idx + 1}.html`);
-      fs.writeFileSync(file, `<!-- To: ${d.email} · Subject: ${renderSubject(d)} -->\n` + renderEmail(d, url));
+      fs.writeFileSync(file, renderEmail(d, url) + `\n<!-- sample for: ${d.email} · subject: ${renderSubject(d)} -->\n`);
     });
     digests.forEach((d) => console.log(`DRY  ${d.email}: ${d.new_releases.length} new, ${d.behind.length} catch-up, ${d.stats.volumes} vols (${d.stats.from_boxes} from boxes)${state.sent[d.email] ? "  [already sent]" : ""}`));
     console.log(`\nDry run only. ${samples.length} rendered sample(s) in digest/samples/ — open them in a browser.`);

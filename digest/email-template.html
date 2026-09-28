@@ -1,3 +1,11 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">
+<title>Your shelf this month</title>
 <!-- Honsama Shelf Digest — email template (rendered per subscriber by digest/send-resend.js).
      Django-style tags (double-brace variables with an optional default filter; if/endif; for/endfor) —
      see the renderer in send-resend.js. This comment must not contain literal tags: it is rendered too.
@@ -10,10 +18,20 @@
        postal_address        DIGEST_POSTAL_ADDRESS (CAN-SPAM footer)
      Subject (sender):  Your shelf grew this month, <first name> 📚
 -->
-<div style="margin:0;padding:0;background-color:#fdf2e2;">
+<style>
+  html, body { margin:0 !important; padding:0 !important; width:100% !important; background-color:#fdf2e2; }
+  table { border-collapse:collapse; }
+  img { border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; }
+  @media only screen and (max-width: 620px) {
+    .wrap { width:100% !important; max-width:100% !important; }
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;width:100%;background-color:#fdf2e2;">
+<center style="width:100%;background-color:#fdf2e2;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf2e2;">
   <tr><td align="center" style="padding:28px 12px;">
-    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;">
+    <table role="presentation" class="wrap" width="600" align="center" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;margin:0 auto;">
 
       <!-- Header -->
       <tr><td align="center" style="padding:0 0 6px;">
@@ -128,4 +146,6 @@
     </table>
   </td></tr>
 </table>
-</div>
+</center>
+</body>
+</html>

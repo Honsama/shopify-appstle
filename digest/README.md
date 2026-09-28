@@ -31,7 +31,7 @@ the code-side reference.
 - Not committed (gitignored): `digests.json`, `send-state.json`, `samples/`.
 
 ## Unsubscribe (we own compliance — there is no ESP doing it)
-Every email carries `https://shopify-appstle.vercel.app/api/digest/unsubscribe?c=<customerId>&t=<hmac>`
+Every email carries `https://app.honsama.com/api/digest/unsubscribe?c=<customerId>&t=<hmac>` (`app.honsama.com` is a Cloudflare CNAME onto the Vercel project, added 2026-09-28; `shopify-appstle.vercel.app` still answers)
 in the footer and in `List-Unsubscribe` / `List-Unsubscribe-Post` headers.
 - Plain click → one-line page with one **Unsubscribe** button (a plain link
   with `&confirm=1`). The extra click stops mail-scanner prefetches from
@@ -54,7 +54,7 @@ in the footer and in `List-Unsubscribe` / `List-Unsubscribe-Post` headers.
 | `DIGEST_POSTAL_ADDRESS` | send-resend.js | physical mailing address printed in the footer (CAN-SPAM) |
 | `DIGEST_FROM` | send-resend.js | optional; default `Ricky at Honsama <ricky@mail.honsama.com>` — must stay on the subdomain |
 | `DIGEST_REPLY_TO` | send-resend.js | optional; default `support@honsama.com` |
-| `DIGEST_UNSUB_BASE` | send-resend.js | optional; default `https://shopify-appstle.vercel.app` |
+| `DIGEST_UNSUB_BASE` | send-resend.js | optional; default `https://app.honsama.com` |
 | `DIGEST_SUBJECT` | send-resend.js | optional; default `Your shelf grew this month, {{first_name}} 📚` |
 
 The sender refuses `--send` until the key, the secret, the postal address, a
