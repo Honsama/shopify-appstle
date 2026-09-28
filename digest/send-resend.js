@@ -27,7 +27,7 @@
  * Optional:
  *   DIGEST_FROM             default: Ricky at Honsama <ricky@mail.honsama.com>
  *   DIGEST_REPLY_TO         default: support@honsama.com
- *   DIGEST_UNSUB_BASE       default: https://shopify-appstle.vercel.app
+ *   DIGEST_UNSUB_BASE       default: https://app.honsama.com (CNAME -> Vercel; the vercel.app host still works)
  *   DIGEST_SUBJECT          default: Your shelf grew this month, {{first_name}} 📚
  */
 
@@ -59,7 +59,7 @@ const CFG = {
   postal: process.env.DIGEST_POSTAL_ADDRESS,
   from: process.env.DIGEST_FROM || "Ricky at Honsama <ricky@mail.honsama.com>",
   replyTo: process.env.DIGEST_REPLY_TO || "support@honsama.com",
-  unsubBase: process.env.DIGEST_UNSUB_BASE || "https://shopify-appstle.vercel.app",
+  unsubBase: process.env.DIGEST_UNSUB_BASE || "https://app.honsama.com",
   subject: process.env.DIGEST_SUBJECT || "Your shelf grew this month, {{first_name}} 📚",
 };
 
