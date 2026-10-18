@@ -29,7 +29,9 @@
  *   digest/box-history.json (a dated snapshot - refresh it after each add-ons
  *   run if you generate from here).
  * Optional:
- *   DIGEST_WINDOW_DAYS   how far back "new this month" looks (default 32)
+ *   DIGEST_WINDOW_DAYS   how far back "new this month" looks, by publish date
+ *                        (default 16: on the 16th that is since the 1st, which
+ *                        catches this month's ~9th publish, not last month's)
  *   SUBSCRIBER_WINDOW    days of box orders that count as "active" (default 45)
  *   ENGINE_PATH          path to collection-engine.js
  *   SERIES_INDEX_PATH    path to series-index.json
@@ -74,7 +76,7 @@ async function resolveAdminToken() {
   ADMIN_API_TOKEN = r.data.access_token;
   return `client credentials (scopes: ${r.data.scope})`;
 }
-const WINDOW_DAYS = parseInt(process.env.DIGEST_WINDOW_DAYS || "32", 10);
+const WINDOW_DAYS = parseInt(process.env.DIGEST_WINDOW_DAYS || "16", 10);
 const SUBSCRIBER_WINDOW = parseInt(process.env.SUBSCRIBER_WINDOW || "45", 10);
 
 const ENGINE_PATH = process.env.ENGINE_PATH ||
@@ -228,7 +230,9 @@ async function fetchBoxHistory() {
   return hist;
 }
 
-// New releases = products created in the window whose SKU parses as a volume.
+// New releases = products published in the window whose SKU parses as a volume.
+// Keyed on publish date, not creation: add-ons are imported as drafts ~the 16th
+// and published ~the 9th of the next month.
 async function fetchNewReleases() {
   const since = new Date(Date.now() - WINDOW_DAYS * 86400 * 1000).toISOString().slice(0, 10);
   const out = [];
@@ -245,7 +249,7 @@ async function fetchNewReleases() {
           }
         }
       }`,
-      { q: `created_at:>=${since} status:active`, after }
+      { q: `published_at:>=${since} status:active`, after }
     );
     const products = data.products;
     products.nodes.forEach((p) => {

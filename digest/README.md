@@ -68,9 +68,15 @@ node digest/generate.js            # builds digest/digests.json, prints counts
 node digest/send-resend.js         # dry run — read the summary, open digest/samples/
 node digest/send-resend.js --send  # sends up to 100; re-run on the 17th for the rest
 ```
-Sanity-check the generate output: subscribers ~100–113, new releases ~30–50.
-If new releases is 0, the add-ons run hasn't happened yet — **wait**; the
-generator prints a warning and every CTA in the email would be empty.
+"New releases" = add-ons **published** in the last 16 days
+(`DIGEST_WINDOW_DAYS`, keyed on `published_at`, not creation date). On the 16th
+that catches this month's ~9th publish and not last month's; the drafts imported
+that day count next month, once they go live.
+
+Sanity-check the generate output: ~80–90 digests, one send day; new releases —
+are these this month's published add-ons? If new releases is 0, this month's
+add-ons aren't published yet — **wait**; the generator prints a warning and
+every CTA in the email would be empty.
 
 ## Self-send and canary
 ```
