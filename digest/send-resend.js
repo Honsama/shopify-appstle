@@ -30,6 +30,17 @@
  *   DIGEST_REPLY_TO         default: support@honsama.com
  *   DIGEST_UNSUB_BASE       default: https://app.honsama.com (CNAME -> Vercel; the vercel.app host still works)
  *   DIGEST_SUBJECT          default: Your shelf grew this month, {{first_name}} 📚
+ *                           (only for digests with no new-release card; the rest get
+ *                           the countdown subject below)
+ *   DIGEST_ONE_TAP          1 = new-release and catch-up buttons carry the signed
+ *                           one-tap add link (/api/digest/add, digest/add-token.js);
+ *                           anything else = they link to the product page as in run 1.
+ *                           THE FLAG IS THE ROLLBACK: set it to 0 and the send is run 1's.
+ *
+ * Subject / preview (2026-10-25, one-tap spec §11 — ported from the volume alert's
+ * _single_copy / _multi_copy): tiers by real days to the 21st (Pacific) at send
+ * time — 0 · 1 · ≤3 · >3. One new release names it; several give the count. The
+ * title is trimmed, never the deadline clause.
  */
 
 const fs = require("fs");
@@ -37,6 +48,7 @@ const path = require("path");
 const crypto = require("crypto");
 const axios = require("axios");
 const unsub = require("./unsub-token");
+const addToken = require("./add-token");
 
 try {
   fs.readFileSync(path.join(__dirname, "..", ".env"), "utf8").split("\n").forEach((line) => {
@@ -65,6 +77,7 @@ const CFG = {
   replyTo: process.env.DIGEST_REPLY_TO || "support@honsama.com",
   unsubBase: process.env.DIGEST_UNSUB_BASE || "https://app.honsama.com",
   subject: process.env.DIGEST_SUBJECT || "Your shelf grew this month, {{first_name}} 📚",
+  oneTap: process.env.DIGEST_ONE_TAP === "1",
 };
 
 const DIGESTS_PATH = path.join(__dirname, "digests.json");
@@ -155,20 +168,103 @@ function renderNodes(nodes, scope) {
   return out;
 }
 
+// ---- countdown to the 21st (subject, preview, banner) ----------------------
+// Port of honsama_automation\volume_alert\alert_email_generator.py. Days are
+// counted in Pacific time, the clock the 20th 11:59 PM PT cutoff runs on.
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const SUBJECT_MAX = 60;   // ~60 chars of subject show in most inboxes
+const PREVIEW_MAX = 90;   // preview text gets ~90 chars before truncation
+
+function countdown(now) {
+  const pd = addToken.pacificDate(now);
+  let y = pd.year, m = pd.month;
+  if (pd.day > 21) { m += 1; if (m > 12) { m = 1; y += 1; } }   // past it: next month's 21st
+  const days = Math.round((Date.UTC(y, m - 1, 21) - Date.UTC(pd.year, pd.month - 1, pd.day)) / 864e5);
+  return { days, deadline: `${MONTHS[m - 1]} 21st`, month: pd.ym };
+}
+
+// Trim to limit at a word boundary, adding an ellipsis.
+function shorten(text, limit) {
+  text = String(text || "");
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit - 1);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > 0 ? cut.slice(0, sp) : cut) + "…";
+}
+
+function singleCopy(title, days, deadline) {
+  let suffix, preview;
+  if (days === 0) { suffix = " — today's the last day"; preview = "Your add-on window closes today — last call, honestly."; }
+  else if (days === 1) { suffix = " — window closes tomorrow"; preview = "Tomorrow is the last day to add this to your box — we didn't want you to miss it."; }
+  else if (days <= 3) { suffix = ` — ${days} days left to add it`; preview = `Only ${days} days left in your add-on window — after ${deadline}, it waits until next month.`; }
+  else { suffix = " just dropped"; preview = `It's in your add-on window until ${deadline} — we only order copies that get claimed.`; }
+  // Shorten the title, not the sentence — "…Vol. 14 just dropped" beats a chopped title
+  return { subject: shorten(title, SUBJECT_MAX - suffix.length) + suffix, preview };
+}
+
+function multiCopy(count, firstTitle, days, deadline) {
+  let subject, tail;
+  if (days === 0) { subject = `Last day: ${count} new volumes for your series`; tail = "— your add-on window closes today."; }
+  else if (days === 1) { subject = `${count} new volumes — window closes tomorrow`; tail = "— tomorrow is the last day to add them."; }
+  else if (days <= 3) { subject = `${count} new volumes — ${days} days left to add them`; tail = `— only ${days} days left before the window closes.`; }
+  else { subject = `${count} new volumes for your series just dropped`; tail = `— in your add-on window until ${deadline}.`; }
+  // Shorten the title so the urgency tail always survives truncation
+  const more = ` + ${count - 1} more `;
+  return { subject, preview: `${shorten(firstTitle, PREVIEW_MAX - more.length - tail.length)}${more}${tail}` };
+}
+
+// The red banner above the new-release cards. HTML on purpose (rendered |safe):
+// every piece is a number or a month name, nothing from the customer.
+function bannerHtml(days, deadline) {
+  if (days === 0) return "⚠️ Today is the last day to add these to your box.";
+  if (days === 1) return "⏰ <strong>1 day left</strong> — add-on window closes tomorrow.";
+  if (days <= 3) return `⏰ Only <strong>${days} days left</strong> to add these to your box before ${deadline}.`;
+  return `Your add-on window closes <strong>${deadline}</strong> — don't miss it.`;
+}
+
+// DIGEST_NOW (ISO date) pins the clock for a dry run, e.g. to see the Nov 16
+// tiers today. Never set it for --send.
+const CLOCK = countdown(process.env.DIGEST_NOW ? new Date(process.env.DIGEST_NOW) : new Date());
+
+function copyFor(digest) {
+  const items = digest.new_releases || [];
+  if (!items.length) return { subject: CFG.subject.replace(/\{\{\s*first_name\s*\}\}/g, digest.first_name || "reader"), preview: "" };
+  const first = items[0].title || `${items[0].series} Vol. ${items[0].volume}`;
+  return items.length === 1 ? singleCopy(first, CLOCK.days, CLOCK.deadline) : multiCopy(items.length, first, CLOCK.days, CLOCK.deadline);
+}
+
+// The one-tap link for a card, or null (flag off, secret missing, or the card's
+// digests.json row predates variant ids) — the card then links to the product page.
+function oneTapUrl(digest, variantId, handle) {
+  if (!CFG.oneTap || !CFG.unsubSecret || !/^\d+$/.test(String(variantId || "")) || !handle) return null;
+  return addToken.addUrl(CFG.unsubBase, digest.customer_id, variantId, handle, CLOCK.month, CFG.unsubSecret);
+}
+
 const TEMPLATE = parseTemplate(fs.readFileSync(TEMPLATE_PATH, "utf8"));
 function renderEmail(digest, unsubscribeUrl) {
+  const stats = digest.stats || {};
   const ctx = {
     first_name: digest.first_name || "",
-    new_releases: digest.new_releases || [],
-    behind: digest.behind || [],
-    stats: digest.stats || {},
+    preview: copyFor(digest).preview,
+    banner_html: bannerHtml(CLOCK.days, CLOCK.deadline),
+    deadline: CLOCK.deadline,
+    new_releases: (digest.new_releases || []).map((item) => Object.assign({}, item, {
+      add_url: oneTapUrl(digest, item.variant_id, item.handle) || item.url,
+      price_label: Number(item.price) > 0 ? `$${Number(item.price).toFixed(2)}` : "",
+    })),
+    behind: (digest.behind || []).map((s) => Object.assign({}, s, {
+      next_add_url: s.next_volume ? oneTapUrl(digest, s.next_variant_id, s.next_handle) : null,
+      them: Number(s.behind) === 1 ? "it" : "them",
+    })),
+    stats,
+    volumes_label: Number(stats.volumes) === 1 ? "volume collected" : "volumes collected",
     unsubscribe_url: unsubscribeUrl,
     postal_address: CFG.postal || "",
   };
   return renderNodes(TEMPLATE, [ctx]);
 }
 function renderSubject(digest) {
-  return CFG.subject.replace(/\{\{\s*first_name\s*\}\}/g, digest.first_name || "reader");
+  return copyFor(digest).subject;
 }
 
 // ---- state ----------------------------------------------------------------
@@ -221,7 +317,17 @@ async function main() {
     ["DIGEST_POSTAL_ADDRESS", !!CFG.postal, "physical mailing address for the footer (CAN-SPAM)"],
     ["From uses mail.honsama.com", /@mail\.honsama\.com>?$/.test(CFG.from), `From is "${CFG.from}" — the rule says subdomain only`],
     ["customer_id on every digest", digests.every((d) => /^\d+$/.test(String(d.customer_id || ""))), "re-run generate.js (older digests.json lacks customer_id)"],
+    ["DIGEST_NOW not set (--send runs on the real clock)", !(SEND && process.env.DIGEST_NOW), "DIGEST_NOW is for dry runs only — unset it before --send"],
   ];
+  // One-tap: only checked when the flag is on. A card without a variant id would
+  // quietly fall back to the product page, so --send refuses instead.
+  console.log(`  DIGEST_ONE_TAP ${CFG.oneTap ? "on  — cards carry the signed one-tap add link" : "off — cards link to the product page (run 1 behaviour)"}`);
+  if (CFG.oneTap) {
+    checks.push(["variant_id + handle on every new-release card (one-tap)",
+      digests.every((d) => (d.new_releases || []).every((r) => /^\d+$/.test(String(r.variant_id || "")) && r.handle)),
+      "re-run generate.js (this digests.json predates one-tap) or set DIGEST_ONE_TAP=0"]);
+  }
+  console.log(`  countdown: ${CLOCK.days} day(s) to ${CLOCK.deadline} (Pacific${process.env.DIGEST_NOW ? `, pinned by DIGEST_NOW=${process.env.DIGEST_NOW}` : ""}) · one-tap links signed for ${CLOCK.month}`);
   let ok = true;
   for (const [name, pass, hint] of checks) { console.log(`  ${pass ? "OK     " : "MISSING"} ${name}${pass ? "" : " — " + hint}`); if (!pass) ok = false; }
 
@@ -241,9 +347,10 @@ async function main() {
     samples.forEach((d, idx) => {
       const url = CFG.unsubSecret ? unsub.unsubscribeUrl(CFG.unsubBase, d.customer_id, CFG.unsubSecret) : `${CFG.unsubBase}/api/digest/unsubscribe?c=${d.customer_id}&t=UNSIGNED-SET-DIGEST_UNSUB_SECRET`;
       const file = path.join(SAMPLES_DIR, `sample-${idx + 1}.html`);
-      fs.writeFileSync(file, renderEmail(d, url) + `\n<!-- sample for: ${d.email} · subject: ${renderSubject(d)} -->\n`);
+      const c = copyFor(d);
+      fs.writeFileSync(file, renderEmail(d, url) + `\n<!-- sample for: ${d.email} · subject: ${c.subject} · preview: ${c.preview} -->\n`);
     });
-    digests.forEach((d) => console.log(`DRY  ${d.email}: ${d.new_releases.length} new, ${d.behind.length} catch-up, ${d.stats.volumes} vols (${d.stats.from_boxes} from boxes)${state.sent[d.email] ? "  [already sent]" : ""}`));
+    digests.forEach((d) => console.log(`DRY  ${d.email}: ${d.new_releases.length} new, ${d.behind.length} catch-up, ${d.stats.volumes} vols (${d.stats.from_boxes} from boxes) · "${renderSubject(d)}"${state.sent[d.email] ? "  [already sent]" : ""}`));
     console.log(`\nDry run only. ${samples.length} rendered sample(s) in digest/samples/ — open them in a browser.`);
     if (!ok) console.log("Fix the MISSING lines above before --send.");
     return;

@@ -5,7 +5,7 @@ const cors = require("cors");
 const https = require("https");
 // 2026-09-28: the light novel add-on goes onto the contract as a RECURRING line, once.
 // Decision + duplicate guard live in ln-box-add.js (tests: node ln-box-add.test.js).
-const { isLnVariant, runLnBoxAdd } = require("./ln-box-add");
+const { isLnVariant, runLnBoxAdd, collectLines } = require("./ln-box-add");
 
 // ---------------------------------------------------------------------------
 // TRANSPORT DEFAULTS (2026-08-20, revised 2026-09-05)
@@ -74,22 +74,25 @@ const allowedOrigins = [
 ];
 
 // ✅ Dynamic CORS Configuration
-app.use(
-    cors({
-        origin: (origin, callback) => {
-            // Allow requests with no origin (like mobile apps or CURL)
-            if (!origin) return callback(null, true);
-            if (allowedOrigins.includes(origin)) {
-                callback(null, true);
-            } else {
-                callback(new Error("Not allowed by CORS"));
-            }
-        },
-        methods: ["GET", "POST", "PUT", "DELETE"],
-        allowedHeaders: ["Content-Type", "Authorization"],
-        credentials: true
-    })
-);
+// /api/digest/* is skipped: those are pages a reader opens from an email, and
+// the one-tap add's "Add it" button is a same-origin form POST from
+// app.honsama.com, which browsers stamp with an Origin this list doesn't
+// hold. Those routes authenticate by HMAC, not by origin.
+const corsGate = cors({
+    origin: (origin, callback) => {
+        // Allow requests with no origin (like mobile apps or CURL)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true
+});
+app.use((req, res, next) => (req.path.startsWith("/api/digest/") ? next() : corsGate(req, res, next)));
 
 // ✅ Root Route (Home Page)
 app.get("/", (req, res) => {
@@ -822,65 +825,16 @@ async function addToBoxHandler(req, res) {
     try {
         const contract = await getContractForCustomer(req.customerId);
         if (!contract) return res.status(403).json({ error: "No active subscription." });
-        const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
-
-        // THE LIGHT NOVEL ADD-ON IS RECURRING, AND IT IS THE ONLY EXCEPTION (2026-09-28).
-        //
-        // Its page sells "one brand-new light novel, every month", the box page
-        // sells it as a subscription line, and the My Box drawer files it under
-        // "My Subscriptions" by product id whatever its billing type. This route
-        // added it one-time like everything else, so a subscriber who tapped
-        // "Add to my box" got one book, then nothing — confirmed on the test
-        // account in the Appstle portal ("Added as one time purchase only").
-        //
-        // What happens instead: read the contract first. A paid recurring light
-        // novel already there → 200 {already:true}, no write (200 on purpose: the
-        // page script treats any non-2xx as "Unable to add", and a duplicate is
-        // not a failure). A paid ONE-TIME light novel there (this bug's output) →
-        // remove it, then add the recurring line, so nothing stacks on the next
-        // box. A $0 line is the tenure-reward copy and does not count. Otherwise
-        // add at quantity 1 with isOneTimeProduct=false — the same call
-        // ln_reward_sync.py's restore makes, proven on a test contract 2026-09-02.
-        // Appstle marks one-time lines with the attribute
-        // `_appstle-one-time-product`; the module reads that, an isOneTimeProduct
-        // field, or an empty sellingPlanId, and treats "unknown" as recurring so
-        // nobody is ever charged for a second copy. Manga and backlist volumes
-        // (My Library catch-up, title pages, the drawer) take the one-time path
-        // below, unchanged. Writes go through contractPut, so the STALE_CONTRACT
-        // and rate-limit retries apply here too; failures fall to the catch and
-        // keep this route's 409 JSON contract.
-        if (isLnVariant(variantId)) {
-            const base = "https://subscription-admin.appstle.com/api/external/v2/";
-            const out = await runLnBoxAdd({
-                contractGet: (id) => contractDetailRows(id),
-                contractPut: (endpoint, params) => {
-                    const qs = Object.keys(params).map((k) => `${k}=${encodeURIComponent(String(params[k]))}`).join("&");
-                    return contractPut(`${base}${endpoint}?${qs}`, headers, `proxy/add-line-item light novel contract ${contract.id}`)
-                        .then((r) => r.response.data);
-                },
-                contractRemove: (id, lineId) =>
-                    contractPut(`${base}subscription-contracts-remove-line-item?contractId=${id}&lineId=${encodeURIComponent(lineId)}&removeDiscount=true`,
-                        headers, `proxy/box-add replace one-time light novel line ${lineId}`)
-                        .then((r) => r.response.data),
-                log: (m) => console.log(m),
-            }, contract.id);
-            return res.status(200).json(Object.assign({ contractId: contract.id, ms: Date.now() - req._addStartedAt }, out));
+        const added = await addVariantToContract(contract, variantId, quantity, "proxy");
+        if (added.ln) {
+            return res.status(200).json(Object.assign({ contractId: contract.id, ms: Date.now() - req._addStartedAt }, added.out));
         }
-
-        const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-add-line-item?contractId=${contract.id}&quantity=${quantity}&variantId=${variantId}&isOneTimeProduct=true`;
-
-        // `attempts` and `ms` are diagnostics, not decoration. A recovered
-        // write is otherwise indistinguishable from a slow one, and the only
-        // place that recorded the difference was a Vercel log nobody could
-        // reach. `attempts: 2` on a real run is what finally proved the retry
-        // fires and that it does not double-add.
-        const { response, attempts, ms } = await contractPut(url, headers, `proxy/add-line-item variant ${variantId}`);
         return res.status(200).json({
             ok: true,
             contractId: contract.id,
-            attempts,
-            ms,
-            data: response.data,
+            attempts: added.attempts,
+            ms: added.ms,
+            data: added.data,
         });
     } catch (error) {
         // Log the WHOLE upstream body. This is the only place the real reason
@@ -920,6 +874,69 @@ async function addToBoxHandler(req, res) {
             details: upstream || error.message,
         });
     }
+}
+
+// THE SHARED ADD (2026-10-25, one-tap spec §4 #3). One implementation for
+// every surface that puts a volume on a contract: /proxy/add-line-item,
+// /api/appstle/box-add (addToBoxHandler above) and the Shelf Digest one-tap
+// (/api/digest/add). `source` labels the log lines ("proxy", "digest_onetap").
+// Returns { ln: true, out } for the light novel, else { data, attempts, ms }.
+// Throws the upstream error; each caller answers it in its own shape.
+async function addVariantToContract(contract, variantId, quantity, source) {
+    const headers = { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" };
+
+    // THE LIGHT NOVEL ADD-ON IS RECURRING, AND IT IS THE ONLY EXCEPTION (2026-09-28).
+    //
+    // Its page sells "one brand-new light novel, every month", the box page
+    // sells it as a subscription line, and the My Box drawer files it under
+    // "My Subscriptions" by product id whatever its billing type. This route
+    // added it one-time like everything else, so a subscriber who tapped
+    // "Add to my box" got one book, then nothing — confirmed on the test
+    // account in the Appstle portal ("Added as one time purchase only").
+    //
+    // What happens instead: read the contract first. A paid recurring light
+    // novel already there → 200 {already:true}, no write (200 on purpose: the
+    // page script treats any non-2xx as "Unable to add", and a duplicate is
+    // not a failure). A paid ONE-TIME light novel there (this bug's output) →
+    // remove it, then add the recurring line, so nothing stacks on the next
+    // box. A $0 line is the tenure-reward copy and does not count. Otherwise
+    // add at quantity 1 with isOneTimeProduct=false — the same call
+    // ln_reward_sync.py's restore makes, proven on a test contract 2026-09-02.
+    // Appstle marks one-time lines with the attribute
+    // `_appstle-one-time-product`; the module reads that, an isOneTimeProduct
+    // field, or an empty sellingPlanId, and treats "unknown" as recurring so
+    // nobody is ever charged for a second copy. Manga and backlist volumes
+    // (My Library catch-up, title pages, the drawer) take the one-time path
+    // below, unchanged. Writes go through contractPut, so the STALE_CONTRACT
+    // and rate-limit retries apply here too; failures fall to the catch and
+    // keep this route's 409 JSON contract.
+    if (isLnVariant(variantId)) {
+        const base = "https://subscription-admin.appstle.com/api/external/v2/";
+        const out = await runLnBoxAdd({
+            contractGet: (id) => contractDetailRows(id),
+            contractPut: (endpoint, params) => {
+                const qs = Object.keys(params).map((k) => `${k}=${encodeURIComponent(String(params[k]))}`).join("&");
+                return contractPut(`${base}${endpoint}?${qs}`, headers, `${source}/add-line-item light novel contract ${contract.id}`)
+                    .then((r) => r.response.data);
+            },
+            contractRemove: (id, lineId) =>
+                contractPut(`${base}subscription-contracts-remove-line-item?contractId=${id}&lineId=${encodeURIComponent(lineId)}&removeDiscount=true`,
+                    headers, `${source}/box-add replace one-time light novel line ${lineId}`)
+                    .then((r) => r.response.data),
+            log: (m) => console.log(m),
+        }, contract.id);
+        return { ln: true, out };
+    }
+
+    const url = `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-add-line-item?contractId=${contract.id}&quantity=${quantity}&variantId=${variantId}&isOneTimeProduct=true`;
+
+    // `attempts` and `ms` are diagnostics, not decoration. A recovered
+    // write is otherwise indistinguishable from a slow one, and the only
+    // place that recorded the difference was a Vercel log nobody could
+    // reach. `attempts: 2` on a real run is what finally proved the retry
+    // fires and that it does not double-add.
+    const { response, attempts, ms } = await contractPut(url, headers, `${source}/add-line-item variant ${variantId}`);
+    return { data: response.data, attempts, ms };
 }
 
 // "Honsama's Monthly Manga Box" product + its 2-Manga variant. Box billing
@@ -1984,19 +2001,8 @@ app.post("/api/appstle/box-discount", verifyAppProxy, requireAppstleKey, boxDisc
 // subscription itself is untouched — the page says so.
 // ============================================================================
 const digestUnsub = require("./digest/unsub-token");
+const { digestPage } = require("./digest/page");
 const DIGEST_UNSUB_SECRET = process.env.DIGEST_UNSUB_SECRET;
-
-function digestPage(title, line, button) {
-    return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + title + " · Honsama</title></head>" +
-        "<body style=\"margin:0;background:#fdf2e2;font-family:Arial,Helvetica,sans-serif;color:#35221b;\">" +
-        "<div style=\"max-width:460px;margin:60px auto;padding:0 20px;text-align:center;\">" +
-        "<div style=\"font-family:Georgia,serif;font-size:26px;font-weight:bold;color:#821e1d;letter-spacing:1px;margin-bottom:22px;\">HONSAMA</div>" +
-        "<div style=\"background:#fffdf8;border:1px solid #e8d5b5;border-radius:14px;padding:26px 22px;\">" +
-        "<div style=\"font-size:17px;font-weight:bold;margin-bottom:10px;\">" + title + "</div>" +
-        "<div style=\"font-size:14px;line-height:1.55;color:#5a4238;\">" + line + "</div>" +
-        (button ? "<a href=\"" + button.href + "\" style=\"display:inline-block;margin-top:18px;background:#821e1d;color:#fff;font-weight:bold;text-decoration:none;padding:12px 28px;border-radius:10px;font-size:14px;\">" + button.label + "</a>" : "") +
-        "</div></div></body></html>";
-}
 
 function digestUnsubAuth(req, res) {
     if (!DIGEST_UNSUB_SECRET) {
@@ -2056,6 +2062,70 @@ app.post("/api/digest/unsubscribe", async (req, res) => {
     if (!customerId) return;
     await digestUnsubDo(customerId, res);
 });
+
+// ============================================================================
+// 📧 Shelf Digest — one-tap add ("add from your inbox"), 2026-10-25
+// ----------------------------------------------------------------------------
+// Spec: HonsamaOps\Honsama Email Automation\resend_digest\ONE_TAP_ADD_SPEC.md.
+// The logic (pages, checks, GET-never-writes) lives in digest/add-route.js with
+// its I/O injected; this block wires the real calls. Same self-authenticating
+// shape as the unsubscribe above: HMAC with DIGEST_UNSUB_SECRET under the
+// "digest-add:" prefix (digest/add-token.js), outside the /proxy and
+// /api/appstle gates. The route is always live; the sender's DIGEST_ONE_TAP
+// flag decides whether any email carries these links.
+//
+// Source record (instrumentation spec, `digest_onetap`): the external
+// add-line-item call this app makes carries no line attributes, and whether
+// Appstle would pass a `_source` through is unverified, so every add takes the
+// spec's ledger fallback, the customer metafield honsama.digest_adds —
+// { adds: [{ variantId, month, at, lineId, undoneAt? }] } — and the metrics
+// run counts the entries without undoneAt.
+// ============================================================================
+const { makeDigestAdd } = require("./digest/add-route");
+const DIGEST_ADDS_METAFIELD = { namespace: "honsama", key: "digest_adds" };
+
+// Append or update one ledger entry, conditionally (compareDigest), re-reading on
+// STALE_OBJECT exactly as setLedgerEntry does for referrals.
+async function digestAddsLedger(customerId, change) {
+    if (!ADMIN_API_TOKEN) throw new Error("ADMIN_API_TOKEN not set");
+    let st = await readJsonMetafield(customerId, DIGEST_ADDS_METAFIELD);
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const ledger = st.ledger && Array.isArray(st.ledger.adds) ? st.ledger : { adds: [] };
+        if (!change(ledger.adds)) return;
+        if (await writeJsonMetafield(customerId, DIGEST_ADDS_METAFIELD, ledger, st.digest) !== false) return;
+        st = await readJsonMetafield(customerId, DIGEST_ADDS_METAFIELD);
+    }
+    throw new Error("digest_adds ledger kept changing");
+}
+
+const digestAdd = makeDigestAdd({
+    secret: DIGEST_UNSUB_SECRET,
+    now: () => new Date(),
+    getContract: (customerId) => getContractForCustomer(customerId),
+    contractLines: async (contractId) => collectLines(await contractDetailRows(contractId)),
+    // Storefront JSON, not the Admin API (no read_products scope — see findVolume).
+    fetchProduct: async (handle) => {
+        const r = await axios.get(`${STOREFRONT}/products/${encodeURIComponent(handle)}.json`, { timeout: 6000, validateStatus: (s) => s === 200 || s === 404 });
+        return r.status === 404 ? null : (r.data && r.data.product) || null;
+    },
+    addLine: (contract, variantId) => addVariantToContract(contract, variantId, 1, "digest_onetap"),
+    removeLine: (contract, lineId) => contractPut(
+        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-remove-line-item?contractId=${contract.id}&lineId=${encodeURIComponent(lineId)}&removeDiscount=true`,
+        { "X-API-Key": APPSTLE_API_KEY, "Content-Type": "application/json" },
+        `digest_onetap/undo line ${lineId}`),
+    ledgerAdd: (customerId, entry) => digestAddsLedger(customerId, (adds) => { adds.push(entry); return true; }),
+    ledgerUndo: (customerId, lineId) => digestAddsLedger(customerId, (adds) => {
+        const e = adds.find((x) => x.lineId === lineId && !x.undoneAt);
+        if (!e) return false;
+        e.undoneAt = new Date().toISOString();
+        return true;
+    }),
+    log: (m) => console.log(m),
+    error: (m) => console.error(m),
+});
+app.get("/api/digest/add", digestAdd.get);
+app.post("/api/digest/add", digestAdd.post);
+app.post("/api/digest/add-undo", digestAdd.undo);
 
 // ✅ Error Handling for Undefined Routes
 app.use((req, res) => {

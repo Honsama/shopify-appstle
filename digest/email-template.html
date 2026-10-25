@@ -11,12 +11,19 @@
      see the renderer in send-resend.js. This comment must not contain literal tags: it is rendered too.
      Context (from digests.json + the sender):
        first_name            customer first name ('' → 'reader')
-       new_releases[]        {series, volume, title, url, image, price, reason}
-       behind[]              {series, owned, total, behind, pct, favorite, cover, url}
+       preview               hidden preheader (countdown tier; empty when no new-release card)
+       banner_html           red deadline banner above the new-release cards (sender-built, safe)
+       deadline              e.g. "November 21st"
+       new_releases[]        {series, volume, title, url, image, price, price_label, reason,
+                              add_url = signed one-tap link when DIGEST_ONE_TAP=1, else url}
+       behind[]              {series, owned, total, behind, pct, favorite, cover, url,
+                              next_volume, next_add_url (one-tap for the first missing volume, or empty)}
        stats                 {series, volumes, from_boxes, up_to_date, behind_total}
+       volumes_label         "volume collected" / "volumes collected"
        unsubscribe_url       signed link → box app /api/digest/unsubscribe (flips Shopify consent)
        postal_address        DIGEST_POSTAL_ADDRESS (CAN-SPAM footer)
-     Subject (sender):  Your shelf grew this month, <first name> 📚
+     Subject (sender): countdown tiers to the 21st when there is a new-release card,
+     else DIGEST_SUBJECT (Your shelf grew this month, first name 📚).
 -->
 <style>
   html, body { margin:0 !important; padding:0 !important; width:100% !important; background-color:#fdf2e2; }
@@ -24,10 +31,13 @@
   img { border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; }
   @media only screen and (max-width: 620px) {
     .wrap { width:100% !important; max-width:100% !important; }
+    .nr-cover { width:96px !important; }
+    .nr-img { width:96px !important; }
   }
 </style>
 </head>
 <body style="margin:0;padding:0;width:100%;background-color:#fdf2e2;">
+{% if preview %}<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#fdf2e2;">{{ preview }}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>{% endif %}
 <center style="width:100%;background-color:#fdf2e2;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf2e2;">
   <tr><td align="center" style="padding:28px 12px;">
@@ -50,7 +60,7 @@
               <tr>
                 <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
                   <div style="font-size:24px;font-weight:bold;color:#35221b;">{{ stats.volumes }}</div>
-                  <div style="font-size:11px;color:#8a6a55;">volumes collected</div>
+                  <div style="font-size:11px;color:#8a6a55;">{{ volumes_label }}</div>
                 </td>
                 <td align="center" width="33%" style="font-family:Arial,Helvetica,sans-serif;">
                   <div style="font-size:24px;font-weight:bold;color:#821e1d;">{{ stats.from_boxes }}</div>
@@ -67,23 +77,35 @@
       </td></tr>
 
       {% if new_releases %}
+      <!-- Deadline banner: real days to the 21st, from the sender -->
+      <tr><td style="padding:22px 0 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#dd1d1d;border-radius:10px;">
+          <tr><td align="center" style="padding:12px 18px;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:bold;color:#ffffff;line-height:1.45;">
+            {{ banner_html|safe }}
+          </td></tr>
+        </table>
+      </td></tr>
       <!-- New releases for your series -->
-      <tr><td style="padding:22px 2px 8px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;letter-spacing:1px;color:#dd1d1d;">
+      <tr><td style="padding:16px 2px 8px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;letter-spacing:1px;color:#dd1d1d;">
         ★ NEW THIS MONTH — FOR YOUR SERIES
       </td></tr>
       {% for item in new_releases %}
-      <tr><td style="padding:0 0 10px;">
+      <tr><td style="padding:0 0 12px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:12px;">
           <tr>
-            <td width="66" style="padding:12px 0 12px 14px;" valign="top">
-              <a href="{{ item.url }}"><img src="{{ item.image }}" width="52" alt="{{ item.series }}" style="display:block;width:52px;border-radius:6px;border:0;"></a>
+            <td class="nr-cover" width="120" valign="top" style="width:120px;padding:0;">
+              <a href="{{ item.url }}"><img class="nr-img" src="{{ item.image }}" width="120" alt="{{ item.series }}" style="display:block;width:120px;border:0;border-radius:11px 0 0 11px;"></a>
             </td>
-            <td style="padding:12px 10px;font-family:Arial,Helvetica,sans-serif;" valign="middle">
-              <div style="font-size:14px;font-weight:bold;color:#35221b;">{{ item.series }} — Vol. {{ item.volume }}</div>
-              <div style="font-size:12px;color:#8a6a55;padding-top:3px;">Just released · {{ item.reason }}</div>
-            </td>
-            <td width="120" align="right" style="padding:12px 14px 12px 0;" valign="middle">
-              <a href="{{ item.url }}" style="display:inline-block;background-color:#821e1d;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;text-decoration:none;padding:10px 14px;border-radius:8px;">Add to my box</a>
+            <td valign="middle" style="padding:16px;font-family:Arial,Helvetica,sans-serif;">
+              <div style="font-size:16px;font-weight:bold;color:#35221b;line-height:1.3;"><a href="{{ item.url }}" style="color:#35221b;text-decoration:none;">{{ item.series }} — Vol. {{ item.volume }}</a></div>
+              <div style="font-size:12px;color:#8a6a55;padding-top:4px;">Just released · {{ item.reason }}</div>
+              {% if item.price_label %}<div style="font-size:15px;font-weight:bold;color:#dd1d1d;padding-top:8px;">{{ item.price_label }}</div>{% endif %}
+              <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:10px;"><tr>
+                <td style="background-color:#dd1d1d;border-radius:8px;">
+                  <a href="{{ item.add_url }}" style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:bold;color:#ffffff;text-decoration:none;padding:10px 18px;">Add to my next box</a>
+                </td>
+              </tr></table>
+              <div style="font-size:11px;color:#8a6a55;padding-top:6px;">Bills on the 21st · ships in that box</div>
             </td>
           </tr>
         </table>
@@ -114,7 +136,7 @@
                 </td>
               </tr></table>
               <div style="font-size:12px;color:#821e1d;font-weight:bold;padding-top:6px;">
-                <a href="{{ s.url }}" style="color:#821e1d;text-decoration:none;">{{ s.behind }} behind — add them to your next box →</a>
+                {% if s.next_add_url %}<a href="{{ s.next_add_url }}" style="color:#821e1d;text-decoration:none;">{{ s.behind }} behind — add Vol. {{ s.next_volume }} to your next box →</a>{% else %}<a href="{{ s.url }}" style="color:#821e1d;text-decoration:none;">{{ s.behind }} behind — add {{ s.them }} to your next box →</a>{% endif %}
               </div>
             </td>
           </tr>
@@ -132,7 +154,7 @@
         </tr></table>
       </td></tr>
       <tr><td align="center" style="padding:8px 20px 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#8a6a55;line-height:1.5;">
-        Anything you add before the <strong style="color:#821e1d;">21st</strong> ships in next month's box — one package, no extra shipping.
+        <strong style="color:#821e1d;">Add-on deadline: {{ deadline }}.</strong> Anything you add before then ships in next month's box — one package, no extra shipping.
       </td></tr>
 
       <!-- Footer -->

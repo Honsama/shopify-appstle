@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node ln-box-add.test.js"
+    "test": "node ln-box-add.test.js && node digest/add-token.test.js && node digest/digest-add.test.js"
   },
   "keywords": [],
   "author": "",

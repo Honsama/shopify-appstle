@@ -26,6 +26,12 @@ the code-side reference.
   the sender (variables with a default filter, if/endif, for/endfor).
 - `unsub-token.js` — HMAC signing of the unsubscribe link, shared with the
   box app's `/api/digest/unsubscribe` route in `../index.js`.
+- `add-token.js` — HMAC signing of the one-tap add link (same secret,
+  `digest-add:` prefix, month-bound) and the Undo token.
+- `add-route.js` — the one-tap add route logic (`/api/digest/add`,
+  `/api/digest/add-undo`), I/O injected; `../index.js` wires Appstle.
+- `page.js` — the one-card page every public digest route answers with.
+- `add-token.test.js`, `digest-add.test.js` — offline tests (`npm test`).
 - `send-klaviyo.js` — **dormant.** The original Klaviyo event pusher, kept in
   case the Resend lane is ever retired. Its template tags no longer match.
 - Not committed (gitignored): `digests.json`, `send-state.json`, `samples/`.
@@ -55,7 +61,9 @@ in the footer and in `List-Unsubscribe` / `List-Unsubscribe-Post` headers.
 | `DIGEST_FROM` | send-resend.js | optional; default `Ricky at Honsama <ricky@mail.honsama.com>` — must stay on the subdomain |
 | `DIGEST_REPLY_TO` | send-resend.js | optional; default `support@honsama.com` |
 | `DIGEST_UNSUB_BASE` | send-resend.js | optional; default `https://app.honsama.com` |
-| `DIGEST_SUBJECT` | send-resend.js | optional; default `Your shelf grew this month, {{first_name}} 📚` |
+| `DIGEST_SUBJECT` | send-resend.js | optional; default `Your shelf grew this month, {{first_name}} 📚` — only for digests with no new-release card |
+| `DIGEST_ONE_TAP` | send-resend.js | `1` = cards carry the signed one-tap add link; anything else = product-page links (run 1). The rollback. |
+| `DIGEST_NOW` | send-resend.js | dry runs only: pin the clock (e.g. `2026-11-16T17:00:00Z`) to see that day's subject tier. `--send` refuses while it is set. |
 
 The sender refuses `--send` until the key, the secret, the postal address, a
 subdomain From, and a `customer_id` on every digest all read `OK` in its
@@ -77,6 +85,29 @@ Sanity-check the generate output: ~80–90 digests, one send day; new releases �
 are these this month's published add-ons? If new releases is 0, this month's
 add-ons aren't published yet — **wait**; the generator prints a warning and
 every CTA in the email would be empty.
+
+## One-tap add (2026-10-25; spec `resend_digest\ONE_TAP_ADD_SPEC.md`)
+With `DIGEST_ONE_TAP=1`, each new-release card's **Add to my next box** and each
+catch-up card's "add Vol. N" link go to
+`https://app.honsama.com/api/digest/add?c=&v=&h=&m=&t=`:
+- **GET never writes.** It shows a confirm page (cover, title, price, when it
+  bills) with one **Add it** button. Scanners and previews can fetch it freely.
+- **Add it** (a POST) re-checks everything and adds one line, quantity 1,
+  through the same shared add function as Add to My Box → done page with
+  **Undo** (removes exactly that line) and **Open My Box**.
+- Already on the contract → "Already in your next box", no write. No ACTIVE
+  contract → "Your box is paused". Bad, cut-short or other-month link →
+  "This link isn't valid". After the 20th 11:59 PM PT the copy says "the box
+  after"; the add is the same. Appstle failure → a "couldn't add" page.
+- Every add is recorded in the customer metafield `honsama.digest_adds`
+  (`{adds:[{variantId, month, at, lineId, undoneAt?}]}`); Undo stamps `undoneAt`.
+- The route is always deployed; the flag only decides whether emails carry the
+  links. Flag off = run 1's emails exactly (cards link to the product page).
+
+Subject and preview follow the countdown to the 21st (0 · 1 · ≤3 · >3 days,
+Pacific), ported from the volume alert; a red banner above the new-release
+cards says the same. Digests with no new-release card keep `DIGEST_SUBJECT`.
+`DIGEST_NOW=2026-11-16T17:00:00Z node digest/send-resend.js` previews a day.
 
 ## Self-send and canary
 ```

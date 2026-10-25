@@ -245,7 +245,7 @@ async function fetchNewReleases() {
           nodes {
             title handle status onlineStoreUrl
             featuredMedia { preview { image { url } } }
-            variants(first: 1) { nodes { sku price } }
+            variants(first: 1) { nodes { id sku price } }
           }
         }
       }`,
@@ -262,6 +262,8 @@ async function fetchNewReleases() {
         volume: parsed.volume,
         sku,
         title: p.title,
+        handle: p.handle,
+        variant_id: String(p.variants?.nodes?.[0]?.id || "").split("/").pop(), // one-tap add link
         url: `https://honsama.com/products/${p.handle}`,
         image: p.featuredMedia?.preview?.image?.url || "",
         price: p.variants?.nodes?.[0]?.price || "",
@@ -313,9 +315,14 @@ function buildDigest(customer, ownedData, lists, boxHistory, newReleases) {
     .map((r) => {
       const cat = seriesIndex[r.seriesKey] || {};
       return {
-        series: cat.name || r.title,
+        // A series missing from the index (long titles, 2026-10 run 1: "Magic Repo
+        // Man … Strongest! Vol. 2 — Vol. 2") falls back to the title minus its
+        // "Vol. N"; the card adds the volume itself.
+        series: cat.name || eng.seriesNameFromTitle(r.title) || r.title,
         volume: r.volume,
         title: r.title,
+        handle: r.handle,
+        variant_id: r.variant_id,
         url: r.url,
         image: r.image || cat.cover || "",
         price: r.price,
@@ -331,6 +338,9 @@ function buildDigest(customer, ownedData, lists, boxHistory, newReleases) {
     .slice(0, 3)
     .map((s) => {
       const cat = seriesIndex[s.seriesKey] || {};
+      // The first volume they're missing, for the card's one-tap (spec §8 B):
+      // the series index carries each volume's variant id and product URL.
+      const next = s.volumes.find((v) => !v.owned && v.variantId && /\/products\/[^/?#]+/.test(v.url || ""));
       return {
         series: s.name,
         owned: s.ownedCount,
@@ -340,6 +350,9 @@ function buildDigest(customer, ownedData, lists, boxHistory, newReleases) {
         favorite: favSet.has(s.seriesKey),
         cover: s.cover || "",
         url: cat.curl ? `https://honsama.com${cat.curl}` : (s.volumes[0] && s.volumes[0].url) || "https://honsama.com/pages/my-library",
+        next_volume: next ? next.volume : null,
+        next_variant_id: next ? String(next.variantId).split("/").pop() : "",
+        next_handle: next ? /\/products\/([^/?#]+)/.exec(next.url)[1] : "",
       };
     });
 
