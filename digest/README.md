@@ -109,6 +109,26 @@ Pacific), ported from the volume alert; a red banner above the new-release
 cards says the same. Digests with no new-release card keep `DIGEST_SUBJECT`.
 `DIGEST_NOW=2026-11-16T17:00:00Z node digest/send-resend.js` previews a day.
 
+## Day-75 continuation touch (2026-10-27; churn plan #16)
+Same lane, its own three files: `day75-generate.js` → `day75.json` (active +
+tagged + consenting subscribers at day 75–150 of their current run of box
+orders, never touched before, with at least one started series whose next
+unowned volume is live and in stock — up to 6 cards with live price and
+compare-at), `day75-send.js` (dry run by default; `--send`, `--only`, `--to`,
+`--limit`, `--forget <email>`), `day75-template.html`. Once in a lifetime:
+`day75-state.json` is the permanent log (never reset) and every send tags the
+customer `honsama_day75_YYYY_MM`. `DIGEST_ONE_TAP` governs its buttons too.
+Run Mondays; the digest goes first on the 16th/17th (shared 100/day cap).
+The rule, the SOP and the decisions: `HonsamaOps\Honsama Email Automation\day75_continuation\README.md`.
+```
+node digest/day75-generate.js            # who and why → digest/day75.json
+node digest/day75-send.js                # dry run + digest/samples/day75-1..3.html
+node digest/day75-send.js --send
+```
+`generate.js` exports its fetchers (and `fetchOwned` returns `boxOrderDates`)
+and `send-resend.js` exports its renderer, clock and config for these scripts;
+requiring either runs nothing.
+
 ## Self-send and canary
 ```
 node digest/send-resend.js --only ricky.do@honsama.com             # dry run, sample-1.html = your email

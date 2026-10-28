@@ -389,4 +389,8 @@ async function main() {
   console.log("Log: digest/send-state.json · Resend dashboard for bounces/complaints (>2% = stop and read).");
 }
 
-main().catch((e) => { console.error(e.message); process.exit(1); });
+if (require.main === module) main().catch((e) => { console.error(e.message); process.exit(1); });
+
+// Shared with day75-send.js (the Day-75 continuation touch rides the same lane):
+// the renderer, the countdown clock and the config. Requiring this file runs nothing.
+module.exports = { CFG, parseTemplate, renderNodes, countdown, CLOCK, bannerHtml, shorten, escapeHtml };

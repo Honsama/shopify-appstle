@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="format-detection" content="telephone=no,date=no,address=no,email=no">
+<title>The next volumes for your series</title>
+<!-- Honsama Day-75 continuation touch (churn plan #16) — rendered per subscriber by digest/day75-send.js
+     with the Shelf Digest's renderer (variables with a default filter; if/else/endif; for/endfor).
+     This comment must not contain literal tags: it is rendered too.
+     Context (from day75.json + the sender):
+       first_name, boxes, boxes_word       "2 boxes"
+       series_count, one_series, several_series
+       series[]      {series, next_volume, owned_count, total, cover, add_url (one-tap when DIGEST_ONE_TAP=1,
+                      else the product page), url, price_label, compare_label, off_label, shelf_line, from_box, favorite}
+       deadline      e.g. "November 21st"   urgent (3 days or fewer)   banner_html (sender-built, safe)
+       vote_open     Pacific day 1–14       swap_open   Pacific day 17–20
+       unsubscribe_url, postal_address
+     Subject (sender): "<Series> Vol. N is here — 15% off" for one series,
+     "You've started N series — the next volumes are here" for several.
+-->
+<style>
+  html, body { margin:0 !important; padding:0 !important; width:100% !important; background-color:#fdf2e2; }
+  table { border-collapse:collapse; }
+  img { border:0; outline:none; text-decoration:none; -ms-interpolation-mode:bicubic; }
+  @media only screen and (max-width: 620px) {
+    .wrap { width:100% !important; max-width:100% !important; }
+    .nr-cover { width:96px !important; }
+    .nr-img { width:96px !important; }
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;width:100%;background-color:#fdf2e2;">
+{% if preview %}<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#fdf2e2;">{{ preview }}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>{% endif %}
+<center style="width:100%;background-color:#fdf2e2;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf2e2;">
+  <tr><td align="center" style="padding:28px 12px;">
+    <table role="presentation" class="wrap" width="600" align="center" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;margin:0 auto;">
+
+      <!-- Header -->
+      <tr><td align="center" style="padding:0 0 6px;">
+        <div style="font-family:Georgia,'Times New Roman',serif;font-size:30px;font-weight:bold;color:#821e1d;letter-spacing:1px;">HONSAMA</div>
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#8a6a55;padding-top:2px;">The next volumes for your series</div>
+      </td></tr>
+
+      <!-- The one line -->
+      <tr><td style="padding:18px 0 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:14px;">
+          <tr><td style="padding:20px 22px;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#35221b;line-height:1.55;">
+            Hey {{ first_name|default:'reader' }} — {{ boxes }} {{ boxes_word }} in, {% if one_series %}you've started a series worth continuing. Vol. {{ series.0.next_volume }} is out, 15% off for subscribers, and it ships inside your next box.{% else %}you've started {{ series_count }} series with us. The next volume of each is out, 15% off for subscribers, and it ships inside your next box.{% endif %}
+          </td></tr>
+        </table>
+      </td></tr>
+
+      {% if urgent %}
+      <tr><td style="padding:14px 0 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#dd1d1d;border-radius:10px;">
+          <tr><td align="center" style="padding:10px 16px;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#ffffff;line-height:1.4;">
+            {{ banner_html|safe }}
+          </td></tr>
+        </table>
+      </td></tr>
+      {% endif %}
+
+      <!-- One card per started series -->
+      {% for item in series %}
+      <tr><td style="padding:14px 0 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffdf8;border:1px solid #e8d5b5;border-radius:12px;">
+          <tr>
+            <td class="nr-cover" width="120" valign="top" style="width:120px;">
+              <a href="{{ item.add_url }}"><img class="nr-img" src="{{ item.cover }}" width="120" alt="{{ item.series }}" style="display:block;width:120px;border:0;border-radius:11px 0 0 11px;"></a>
+            </td>
+            <td valign="top" style="padding:14px 16px 14px 16px;font-family:Arial,Helvetica,sans-serif;">
+              <div style="font-size:16px;font-weight:bold;color:#35221b;line-height:1.3;"><a href="{{ item.url }}" style="color:#35221b;text-decoration:none;">{{ item.series }} — Vol. {{ item.next_volume }}</a></div>
+              <div style="font-size:12px;color:#8a6a55;padding-top:4px;">{{ item.shelf_line }}</div>
+              {% if item.price_label %}<div style="font-size:15px;font-weight:bold;color:#dd1d1d;padding-top:8px;">{{ item.price_label }}{% if item.compare_label %} <span style="font-weight:normal;color:#b09a88;text-decoration:line-through;">{{ item.compare_label }}</span>{% endif %} <span style="font-size:12px;font-weight:normal;color:#8a6a55;">· {{ item.off_label }}</span></div>{% endif %}
+              <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:10px;"><tr>
+                <td align="center" style="background-color:#821e1d;border-radius:8px;">
+                  <a href="{{ item.add_url }}" style="display:inline-block;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:bold;color:#ffffff;text-decoration:none;padding:10px 18px;">Add Vol. {{ item.next_volume }} to my next box</a>
+                </td>
+              </tr></table>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+      {% endfor %}
+
+      <!-- Deadline -->
+      <tr><td align="center" style="padding:18px 20px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#35221b;line-height:1.55;">
+        <strong style="color:#821e1d;">Add it before {{ deadline }}</strong> and it rides in your next box — one package, no extra shipping. Remove it any time before the 20th from My Box.
+      </td></tr>
+
+      <!-- The other two continuation doors -->
+      <tr><td style="padding:18px 0 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fff7ea;border:1px solid #e8d5b5;border-radius:12px;">
+          <tr><td style="padding:14px 18px;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#35221b;line-height:1.6;">
+            {% if swap_open %}<strong>The swap window is open until the 20th.</strong> Trade{% else %}<strong>Rather not pay?</strong> From the 17th to the 20th you can trade{% endif %} next month's featured pick for the next volume of any series from a past box, free. <a href="https://honsama.com/pages/swap" style="color:#821e1d;">Swap my box →</a>
+            {% if vote_open %}<br>Your vote picks next month's Spotlight — open through the 14th. <a href="https://honsama.com/r/vote" style="color:#821e1d;">Vote →</a>{% endif %}
+          </td></tr>
+        </table>
+      </td></tr>
+
+      <!-- Footer -->
+      <tr><td align="center" style="padding:26px 20px 0;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#b09a88;line-height:1.6;">
+        Honsama · Newly-released manga, monthly<br>
+        You're receiving this because you're a Monthly Manga Box subscriber.<br>
+        <a href="{{ unsubscribe_url }}" style="color:#b09a88;text-decoration:underline;">Unsubscribe</a> from these emails — your box itself is not affected.<br>
+        {{ postal_address }}
+      </td></tr>
+
+    </table>
+  </td></tr>
+</table>
+</center>
+</body>
+</html>

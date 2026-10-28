@@ -19,3 +19,7 @@ digest/digests.json
 digest/send-state.json
 digest/samples/
 digest/box-history.json
+
+# Day-75 continuation touch — subscriber PII + lifetime send log, never commit
+digest/day75.json
+digest/day75-state.json

@@ -155,6 +155,7 @@ async function fetchSubscribers() {
 async function fetchOwned(customerId) {
   const skus = [];
   const boxMonths = new Set(); const boxMonths2 = new Set();
+  const boxOrderDates = []; // every box order's createdAt (day75-generate.js reads tenure from it)
   let after = null;
   for (let page = 0; page < 30; page++) {
     const data = await adminGraphql(
@@ -174,6 +175,7 @@ async function fetchOwned(customerId) {
       (o.lineItems?.nodes || []).forEach((li) => {
         if (li.sku) skus.push(li.sku);
         if (li.product?.id?.endsWith(`/${BOX_PRODUCT_ID}`)) {
+          if (boxOrderDates.indexOf(o.createdAt) === -1) boxOrderDates.push(o.createdAt);
           const month = boxMonthOf(o.createdAt);
           if (li.variant?.id?.endsWith(`/${BOX_VARIANT_2MANGA_ID}`)) boxMonths2.add(month);
           else boxMonths.add(month);
@@ -183,7 +185,7 @@ async function fetchOwned(customerId) {
     if (!orders.pageInfo.hasNextPage) break;
     after = orders.pageInfo.endCursor;
   }
-  return { skus: Array.from(new Set(skus)), boxMonths: Array.from(boxMonths), boxMonths2: Array.from(boxMonths2) };
+  return { skus: Array.from(new Set(skus)), boxMonths: Array.from(boxMonths), boxMonths2: Array.from(boxMonths2), boxOrderDates };
 }
 
 async function fetchCustomerLists(customerId) {
@@ -414,4 +416,9 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildDigest, creditBoxes, boxMonthOf };
+module.exports = {
+  buildDigest, creditBoxes, boxMonthOf,
+  // shared with day75-generate.js / day75-send.js (the Day-75 continuation touch)
+  adminGraphql, resolveAdminToken, fetchSubscribers, fetchOwned, fetchBoxHistory,
+  eng, seriesIndex, SHOP_DOMAIN, BOX_PRODUCT_ID,
+};
