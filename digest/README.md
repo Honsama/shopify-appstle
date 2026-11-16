@@ -150,3 +150,27 @@ consenting subscriber with a non-empty shelf).
   spaces sends at 600 ms and stops cleanly on a daily-quota 429).
 - Engine/index paths default to `../honsama-app/theme/assets/`; override
   with `ENGINE_PATH` / `SERIES_INDEX_PATH` env vars if the layout changes.
+
+## List sender: hype note and skip nudge (2026-11-16; HonsamaOps brief 2, B2-c)
+
+`send-list.js` sends one short email to everyone carrying a customer tag, on this
+same Resend lane (same From, unsubscribe link and consent rule as the digest).
+It replaces pasting the pre-21st hype note and the skip-month nudge into Shopify
+Email. Dry run by default; `--send` to send.
+
+```
+node digest/send-list.js --tag honsama_hype_2026_11 --campaign hype-2026-11 \
+  --html "<HonsamaOps>/Honsama Content/EMAIL_SOPS/hype/2026-11.shopify.html" \
+  --subject "{{first_name}}, December's box locks on the 21st"
+... --send
+... --only me@x.com --send                    # canary; must be on the list
+... --only a@x.com --to me@y.com --send       # test copy of a's email to me
+... --allow-paused                            # skip nudge only
+```
+
+Only customers with consent `SUBSCRIBED` and the Appstle active tag get it
+(`--allow-paused` adds paused). The HTML may be a Shopify Email paste: the
+first-name, `unsubscribe_link` and `open_tracking_block` tokens are filled in,
+and `--send` is refused while any other `{{ }}` is left. `list-state.json` logs
+sends by campaign and customer id, so a re-run reaches only people it missed.
+It shares Resend's 100-a-day free cap with the digest and the Day-75 touch.
